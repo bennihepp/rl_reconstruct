@@ -5,8 +5,11 @@ import cv2
 import rospy
 import tf
 from tf import transformations
+import tf_conversions
+from geometry_msgs.msg import Transform
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
+from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
 from engine.unreal_cv_wrapper import UnrealCVWrapper
 
 
@@ -78,14 +81,14 @@ def create_point_cloud_msg(points):
     return point_cloud_msg
 
 
-def run(engine, point_cloud_publisher, location_origin):
+def run(engine, point_cloud_service, location_origin):
     tf_br = tf.TransformBroadcaster()
     # Names of camera and world frame in ROS
     world_frame = "map"
     sensor_frame = "depth_sensor"
 
     # Setup loop timer
-    rate = rospy.Rate(0.5)
+    rate = rospy.Rate(10)
 
     # Initial angle
     yaw = 0
@@ -119,14 +122,39 @@ def run(engine, point_cloud_publisher, location_origin):
             timestamp,
             sensor_frame, world_frame)
 
-        # Create pointcloud and publish
+        # Create transform message
+        transform_mat = transformations.quaternion_matrix(quaternion)
+        transform_mat[:3, 3] = location
+        quat = transformations.quaternion_from_matrix(transform_mat)
+        trans = transformations.translation_from_matrix(transform_mat)
+        sensor_to_world = Transform()
+        sensor_to_world.translation.x = trans[0]
+        sensor_to_world.translation.y = trans[1]
+        sensor_to_world.translation.z = trans[2]
+        sensor_to_world.rotation.x = quat[0]
+        sensor_to_world.rotation.y = quat[1]
+        sensor_to_world.rotation.z = quat[2]
+        sensor_to_world.rotation.w = quat[3]
+
+        # Create pointcloud message
         rospy.loginfo("Creating point cloud message")
         points = create_points_from_depth_image(pose, depth_image, focal_length)
         # points = create_points_synthetic()
         point_cloud_msg = create_point_cloud_msg(points)
         point_cloud_msg.header.stamp = timestamp
+
+        # Request point cloud insertion
         rospy.loginfo("Publishing point cloud")
-        point_cloud_publisher.publish(point_cloud_msg)
+        try:
+            request = InsertPointCloudRequest()
+            request.point_cloud = point_cloud_msg
+            request.sensor_to_world = sensor_to_world
+            response = point_cloud_service(request)
+        except rospy.ServiceException as exc:
+            print("Point cloud service did not process request: {}".format(str(exc)))
+        else:
+            print("Integrating point cloud took {}s".format(response.elapsed_seconds))
+            print("Received reward: {}".format(response.reward))
 
         # Perform action:
         # Update camera orientation
@@ -144,7 +172,8 @@ def run(engine, point_cloud_publisher, location_origin):
 
 if __name__ == '__main__':
     engine = UnrealCVWrapper()
-    point_cloud_pub = rospy.Publisher('cloud_in', PointCloud2, queue_size=1)
+    rospy.wait_for_service('insert_point_cloud')
+    point_cloud_service = rospy.ServiceProxy('insert_point_cloud', InsertPointCloud, persistent=True)
     location_origin = np.array([0, 0, 0])
     rospy.init_node('test_mapping', anonymous=False)
-    run(engine, point_cloud_pub, location_origin)
+    run(engine, point_cloud_service, location_origin)
