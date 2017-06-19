@@ -88,7 +88,11 @@ def run(engine, point_cloud_service, location_origin):
     sensor_frame = "depth_sensor"
 
     # Setup loop timer
-    rate = rospy.Rate(10)
+    rate = rospy.Rate(0.5)
+
+    center_location = engine.get_location()
+    print(center_location)
+    radius = 0.2
 
     # Initial angle
     yaw = 0
@@ -128,13 +132,13 @@ def run(engine, point_cloud_service, location_origin):
         quat = transformations.quaternion_from_matrix(transform_mat)
         trans = transformations.translation_from_matrix(transform_mat)
         sensor_to_world = Transform()
-        sensor_to_world.translation.x = trans[0]
-        sensor_to_world.translation.y = trans[1]
-        sensor_to_world.translation.z = trans[2]
-        sensor_to_world.rotation.x = quat[0]
-        sensor_to_world.rotation.y = quat[1]
-        sensor_to_world.rotation.z = quat[2]
-        sensor_to_world.rotation.w = quat[3]
+        sensor_to_world.translation.x = location[0]
+        sensor_to_world.translation.y = location[1]
+        sensor_to_world.translation.z = location[2]
+        sensor_to_world.rotation.x = quaternion[0]
+        sensor_to_world.rotation.y = quaternion[1]
+        sensor_to_world.rotation.z = quaternion[2]
+        sensor_to_world.rotation.w = quaternion[3]
 
         # Create pointcloud message
         rospy.loginfo("Creating point cloud message")
@@ -166,6 +170,11 @@ def run(engine, point_cloud_service, location_origin):
         elif yaw < 0:
             yaw += 2 * np.pi
         engine.set_orientation_rpy(roll, pitch, yaw)
+        # Update camera location
+    	new_location = center_location
+    	new_location[0] += radius * np.cos(-yaw)
+    	new_location[1] += radius * np.sin(-yaw)
+    	engine.set_location(new_location)
 
         rate.sleep()
 
