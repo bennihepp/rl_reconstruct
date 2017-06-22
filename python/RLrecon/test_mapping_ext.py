@@ -10,7 +10,7 @@ from geometry_msgs.msg import Transform
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
 from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
-from engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
 
 
 """Returns point cloud in camera frame. Assuming x-axis points forward, y-axis left and z-axis up."""
@@ -81,7 +81,9 @@ def create_point_cloud_msg(points):
     return point_cloud_msg
 
 
-def run(engine, point_cloud_service, location_origin):
+def run(engine, point_cloud_topic, location_origin):
+    point_cloud_service = rospy.ServiceProxy(point_cloud_topic, InsertPointCloud, persistent=True)
+
     tf_br = tf.TransformBroadcaster()
     # Names of camera and world frame in ROS
     world_frame = "map"
@@ -90,9 +92,11 @@ def run(engine, point_cloud_service, location_origin):
     # Setup loop timer
     rate = rospy.Rate(0.5)
 
-    center_location = engine.get_location()
+    # center_location = engine.get_location()
+    center_location = np.array([0, 0, 2])
     print(center_location)
-    radius = 0.2
+    radius = 7.5
+    look_inside = True
 
     # Initial angle
     yaw = 0
@@ -101,6 +105,31 @@ def run(engine, point_cloud_service, location_origin):
     scale_factor = 0.5
 
     while not rospy.is_shutdown():
+        # Perform action:
+        # Update camera orientation
+        roll = 0
+        pitch = 0
+        if yaw >= 2 * np.pi:
+            yaw -= 2 * np.pi
+        elif yaw < 0:
+            yaw += 2 * np.pi
+        engine.set_orientation_rpy(roll, pitch, yaw)
+        # Update camera location
+        new_location = np.copy(center_location)
+        print("new_location={}".format(new_location))
+        print("new_location.shape={}".format(new_location.shape))
+        if look_inside:
+            new_location[0] += radius * np.cos(-yaw + np.pi)
+            new_location[1] += radius * np.sin(-yaw + np.pi)
+        else:
+            new_location[0] += radius * np.cos(-yaw)
+            new_location[1] += radius * np.sin(-yaw)
+        engine.set_location(new_location)
+        print("location: {} {} {}".format(*new_location))
+        print("rotation: {} {} {}".format(roll * 180 / np.pi, pitch * 180 / np.pi, yaw * 180 / np.pi))
+        # Update camera state
+        yaw += 25 * np.pi / 180.
+
         # Read new pose, camera info and depth image
         rospy.loginfo("Reading pose")
         pose = engine.get_pose()
@@ -155,26 +184,12 @@ def run(engine, point_cloud_service, location_origin):
             request.sensor_to_world = sensor_to_world
             response = point_cloud_service(request)
         except rospy.ServiceException as exc:
-            print("Point cloud service did not process request: {}".format(str(exc)))
+            print("WARNING: Point cloud service did not process request: {}".format(str(exc)))
+            print("WARNING: Trying to reconnect to service")
+            point_cloud_service = rospy.ServiceProxy(point_cloud_topic, InsertPointCloud, persistent=True)
         else:
             print("Integrating point cloud took {}s".format(response.elapsed_seconds))
             print("Received reward: {}".format(response.reward))
-
-        # Perform action:
-        # Update camera orientation
-        roll = 0
-        pitch = 0
-        yaw += 25 * np.pi / 180.
-        if yaw >= 2 * np.pi:
-            yaw -= 2 * np.pi
-        elif yaw < 0:
-            yaw += 2 * np.pi
-        engine.set_orientation_rpy(roll, pitch, yaw)
-        # Update camera location
-    	new_location = center_location
-    	new_location[0] += radius * np.cos(-yaw)
-    	new_location[1] += radius * np.sin(-yaw)
-    	engine.set_location(new_location)
 
         rate.sleep()
 
@@ -182,7 +197,7 @@ def run(engine, point_cloud_service, location_origin):
 if __name__ == '__main__':
     engine = UnrealCVWrapper()
     rospy.wait_for_service('insert_point_cloud')
-    point_cloud_service = rospy.ServiceProxy('insert_point_cloud', InsertPointCloud, persistent=True)
+    point_cloud_topic = 'insert_point_cloud'
     location_origin = np.array([0, 0, 0])
     rospy.init_node('test_mapping', anonymous=False)
-    run(engine, point_cloud_service, location_origin)
+    run(engine, point_cloud_topic, location_origin)

@@ -1,0 +1,7 @@
+<launch>
+  <node name="octomap_server_ext_node" pkg="octomap_server_ext" type="octomap_server_ext_node">
+    <param name="resolution" value="0.05" type="double" />
+    <param name="sensor_model/max_range" value="20.0" type="double" />
+  </node>
+</launch>
+
