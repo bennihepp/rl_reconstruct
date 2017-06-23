@@ -1,7 +1,10 @@
 <launch>
-  <node name="octomap_server_ext_node" pkg="octomap_server_ext" type="octomap_server_ext_node">
-    <param name="resolution" value="0.05" type="double" />
+  <node name="octomap_server_ext_node" pkg="octomap_server_ext" type="octomap_server_ext_node" output="screen">
+    <param name="map_file" value="" type="str" />
+    <param name="resolution" value="0.2" type="double" />
     <param name="sensor_model/max_range" value="20.0" type="double" />
+    <param name="use_surface_voxels_for_reward" value="true" type="bool" />
+    <param name="surface_voxel_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/surface_voxels.txt" type="str" />
   </node>
 </launch>
 

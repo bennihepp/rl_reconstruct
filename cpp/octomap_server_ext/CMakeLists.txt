@@ -33,10 +33,41 @@ include_directories(
   ${OCTOMAP_INCLUDE_DIRS}
 )
 
+include("cmake/CheckC11.cmake")
+add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1)
+
+# Add Eigen dependency
+find_package(Eigen3 REQUIRED)
+include_directories(${Eigen3_INCLUDE_DIR})
+
+# Add boost dependency
+set(Boost_USE_STATIC_LIBS OFF)
+set(Boost_USE_MULTITHREADED ON)
+set(Boost_USE_STATIC_RUNTIME OFF)
+find_package(Boost 1.56 COMPONENTS program_options REQUIRED)
+include_directories(${BOOST_INCLUDE_DIR})
+link_directories(${BOOST_LIBRARY_DIRS})
+add_definitions(-DBOOST_ALL_DYN_LINK=1)
+
+# Add mLib dependency
+set(MLIB_ROOT "$ENV{HOME}/src/mLib")
+set(MLIB_INCLUDE_DIR "${MLIB_ROOT}/include")
+set(MLIB_SOURCE_DIR "${MLIB_ROOT}/src")
+include_directories(${MLIB_INCLUDE_DIR} ${MLIB_SOURCE_DIR})
+
+# Add libbh dependency
+set(LIBBH_ROOT "$ENV{HOME}/src/libbh")
+set(LIBBH_INCLUDE_DIR "${LIBBH_ROOT}/include")
+set(LIBBH_SOURCE_DIR "${LIBBH_ROOT}/src")
+set(LIBBH_SOURCES "${LIBBH_SOURCE_DIR}/mLib/mLib.cpp")
+include_directories(${LIBBH_INCLUDE_DIR})
+set(LIBBH_LIBRARIES "${LIBBH_ROOT}/libbh.so")
+
 ## Declare ROS messages and services
 add_service_files(
   FILES
   InsertPointCloud.srv
+  RaycastCamera.srv
 )
 
 ## Generate added messages and services
@@ -74,11 +105,11 @@ add_dependencies(octomap_server_ext_node ${PROJECT_NAME}_gencfg)
 add_executable(octomap_server_ext_static src/octomap_server_ext_static.cpp)
 target_link_libraries(octomap_server_ext_static ${PROJECT_NAME} ${LINK_LIBS})
 
-add_executable(octomap_saver src/octomap_saver.cpp)
+add_executable(octomap_saver src/octomap_saver.cpp ${LIBBH_SOURCES})
 target_link_libraries(octomap_saver ${PROJECT_NAME} ${LINK_LIBS})
 
 # Nodelet
-add_library(octomap_server_ext_nodelet src/octomap_server_ext_nodelet.cpp)
+add_library(octomap_server_ext_nodelet src/octomap_server_ext_nodelet.cpp ${LIBBH_SOURCES})
 target_link_libraries(octomap_server_ext_nodelet ${PROJECT_NAME} ${LINK_LIBS})
 
 # install targets:

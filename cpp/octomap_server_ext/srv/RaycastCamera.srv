@@ -1,0 +1,11 @@
+geometry_msgs/Transform sensor_to_world
+int32 height
+int32 width
+float32 focal_length
+bool ignore_unknown_voxels
+---
+float32 elapsed_seconds
+int32 num_hits_occupied
+int32 num_hits_unknown
+float32 expected_reward
+sensor_msgs/PointCloud2 point_cloud

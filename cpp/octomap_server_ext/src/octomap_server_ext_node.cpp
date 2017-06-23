@@ -37,6 +37,7 @@
 
 
 #include <ros/ros.h>
+#include <ros/console.h>
 #include <octomap_server_ext/OctomapServerExt.h>
 
 #define USAGE "\nUSAGE: octomap_server_ext <map.[bt|ot]>\n" \
@@ -52,6 +53,11 @@ int main(int argc, char** argv){
   if (argc > 2 || (argc == 2 && std::string(argv[1]) == "-h")){
     ROS_ERROR("%s", USAGE);
     exit(-1);
+  }
+
+  // Set default log level to INFO
+  if( ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug) ) {
+    ros::console::notifyLoggerLevelsChanged();
   }
 
   OctomapServerExt server;

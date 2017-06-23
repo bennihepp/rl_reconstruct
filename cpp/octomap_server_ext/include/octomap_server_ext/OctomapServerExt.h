@@ -62,6 +62,7 @@
 #include <octomap_msgs/BoundingBoxQuery.h>
 #include <octomap_msgs/conversions.h>
 #include <octomap_server_ext/InsertPointCloud.h>
+#include <octomap_server_ext/RaycastCamera.h>
 
 #include <octomap_ros/conversions.h>
 #include <octomap/octomap.h>
@@ -89,6 +90,13 @@ public:
   typedef octomap_msgs::GetOctomap OctomapSrv;
   typedef octomap_msgs::BoundingBoxQuery BBXSrv;
 
+  struct RaycastResult {
+      std::size_t num_hits_occupied;
+      std::size_t num_hits_unknown;
+      double expected_reward;
+      PCLPointCloud point_cloud;
+  };
+
   OctomapServerExt(ros::NodeHandle private_nh_ = ros::NodeHandle("~"));
   virtual ~OctomapServerExt();
   virtual bool octomapBinarySrv(OctomapSrv::Request  &req, OctomapSrv::GetOctomap::Response &res);
@@ -99,7 +107,11 @@ public:
   void filterHeightPointCloud(PCLPointCloud& cloud);
   virtual void insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
   virtual bool insertPointCloudSrv(InsertPointCloud::Request &req, InsertPointCloud::Response &res);
+  virtual bool raycastCameraSrv(RaycastCamera::Request &req, RaycastCamera::Response &res);
   virtual bool openFile(const std::string& filename);
+
+  void readSurfaceVoxels(const std::string& filename);
+  double computeReward() const;
 
 protected:
   inline static void updateMinKey(const octomap::OcTreeKey& in, octomap::OcTreeKey& min) {
@@ -127,6 +139,20 @@ protected:
   void publishBinaryOctoMap(const ros::Time& rostime = ros::Time::now()) const;
   void publishFullOctoMap(const ros::Time& rostime = ros::Time::now()) const;
   virtual void publishAll(const ros::Time& rostime = ros::Time::now());
+
+  /**
+  * @brief perform raycast for pinhole camera
+  * The returned point cloud is in global map frame.
+  *
+  * @param sensor_to_world Transform from sensor to world frame
+  * @param height Height of camera image plane
+  * @param width Height of camera image plane
+  * @param focal_length Focal length of pinhole camera
+  * @return Point cloud of hit occupied voxels
+  */
+  virtual RaycastResult raycastCamera(const tf::Transform& sensor_to_world_tf,
+                                      const int height, const int width,
+                                      const float focal_length, const bool ignore_unknown_voxels = false);
 
   /**
   * @brief update occupancy map with a scan
@@ -215,6 +241,7 @@ protected:
   message_filters::Subscriber<sensor_msgs::PointCloud2>* m_pointCloudSub;
   tf::MessageFilter<sensor_msgs::PointCloud2>* m_tfPointCloudSub;
   ros::ServiceServer m_insertPointCloudService;
+  ros::ServiceServer m_raycastCameraService;
   ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_clearBBXService, m_resetService;
   tf::TransformListener m_tfListener;
   boost::recursive_mutex m_config_mutex;
@@ -270,6 +297,16 @@ protected:
   unsigned m_multires2DScale;
   bool m_projectCompleteMap;
   bool m_useColoredMap;
+
+  std::string m_surfaceVoxelsFilename;
+  std::vector<octomath::Vector3> m_surfaceVoxels;
+  std::vector<octomap::OcTreeKey> m_surfaceVoxelKeys;
+  float m_voxelFreeThreshold;
+  float m_voxelOccupiedThreshold;
+  double m_rewardPerFreeVoxel;
+  double m_rewardPerOccupiedVoxel;
+  bool m_useSurfaceVoxelsForReward;
+  double m_reward;
 };
 }
 

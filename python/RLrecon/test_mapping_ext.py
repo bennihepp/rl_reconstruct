@@ -72,7 +72,7 @@ def create_point_cloud_msg(points):
     #     points_flat[3 * i + 0] = float(points[i][0])
     #     points_flat[3 * i + 1] = float(points[i][1])
     #     points_flat[3 * i + 2] = float(points[i][2])
-    #     # print('{} {} {}'.format(*[points[i][j] for j in xrange(3)]))
+    #     # rospy.logdebug('{} {} {}'.format(*[points[i][j] for j in xrange(3)]))
     # # for point in points:
     # #     points_flat.append(float(point[0]))
     # #     points_flat.append(float(point[1]))
@@ -82,19 +82,15 @@ def create_point_cloud_msg(points):
 
 
 def run(engine, point_cloud_topic, location_origin):
+    rospy.wait_for_service(point_cloud_topic)
     point_cloud_service = rospy.ServiceProxy(point_cloud_topic, InsertPointCloud, persistent=True)
-
-    tf_br = tf.TransformBroadcaster()
-    # Names of camera and world frame in ROS
-    world_frame = "map"
-    sensor_frame = "depth_sensor"
 
     # Setup loop timer
     rate = rospy.Rate(0.5)
 
     # center_location = engine.get_location()
     center_location = np.array([0, 0, 2])
-    print(center_location)
+    rospy.loginfo("Center location: {}".format(center_location))
     radius = 7.5
     look_inside = True
 
@@ -116,8 +112,6 @@ def run(engine, point_cloud_topic, location_origin):
         engine.set_orientation_rpy(roll, pitch, yaw)
         # Update camera location
         new_location = np.copy(center_location)
-        print("new_location={}".format(new_location))
-        print("new_location.shape={}".format(new_location.shape))
         if look_inside:
             new_location[0] += radius * np.cos(-yaw + np.pi)
             new_location[1] += radius * np.sin(-yaw + np.pi)
@@ -125,19 +119,19 @@ def run(engine, point_cloud_topic, location_origin):
             new_location[0] += radius * np.cos(-yaw)
             new_location[1] += radius * np.sin(-yaw)
         engine.set_location(new_location)
-        print("location: {} {} {}".format(*new_location))
-        print("rotation: {} {} {}".format(roll * 180 / np.pi, pitch * 180 / np.pi, yaw * 180 / np.pi))
+        rospy.logdebug("location: {} {} {}".format(*new_location))
+        rospy.logdebug("rotation: {} {} {}".format(roll * 180 / np.pi, pitch * 180 / np.pi, yaw * 180 / np.pi))
         # Update camera state
         yaw += 25 * np.pi / 180.
 
         # Read new pose, camera info and depth image
-        rospy.loginfo("Reading pose")
+        rospy.logdebug("Reading pose")
         pose = engine.get_pose()
         focal_length = engine.get_focal_length() * scale_factor
         depth_image = engine.get_depth_image()
         dsize = (int(depth_image.shape[1] * scale_factor), int(depth_image.shape[0] * scale_factor))
         depth_image = cv2.resize(depth_image, dsize=dsize, interpolation=cv2.INTER_CUBIC)
-        rospy.loginfo("min depth={}, max depth={}".format(
+        rospy.logdebug("min depth={}, max depth={}".format(
             np.min(depth_image.flatten()), np.max(depth_image.flatten())))
 
         # Publish transform
@@ -145,15 +139,11 @@ def run(engine, point_cloud_topic, location_origin):
         quaternion = pose[1]
         euler_ypr = np.array(transformations.euler_from_quaternion(quaternion, 'rzyx'))
         euler_rpy = engine.get_orientation_rpy()
-        # print('location: {}'.format(location))
-        # print('quaternion: {}'.format(quaternion))
-        # print('euler_ypr: {}'.format(euler_ypr * 180 / np.pi))
-        # print('euler_rpy: {}'.format(euler_rpy * 180 / np.pi))
+        # rospy.logdebug('location: {}'.format(location))
+        # rospy.logdebug('quaternion: {}'.format(quaternion))
+        # rospy.logdebug('euler_ypr: {}'.format(euler_ypr * 180 / np.pi))
+        # rospy.logdebug('euler_rpy: {}'.format(euler_rpy * 180 / np.pi))
         timestamp = rospy.Time.now()
-        tf_br.sendTransform(
-            location, quaternion,
-            timestamp,
-            sensor_frame, world_frame)
 
         # Create transform message
         transform_mat = transformations.quaternion_matrix(quaternion)
@@ -170,33 +160,32 @@ def run(engine, point_cloud_topic, location_origin):
         sensor_to_world.rotation.w = quaternion[3]
 
         # Create pointcloud message
-        rospy.loginfo("Creating point cloud message")
+        rospy.logdebug("Creating point cloud message")
         points = create_points_from_depth_image(pose, depth_image, focal_length)
         # points = create_points_synthetic()
         point_cloud_msg = create_point_cloud_msg(points)
         point_cloud_msg.header.stamp = timestamp
 
         # Request point cloud insertion
-        rospy.loginfo("Publishing point cloud")
+        rospy.logdebug("Requesting point cloud insertion")
         try:
             request = InsertPointCloudRequest()
             request.point_cloud = point_cloud_msg
             request.sensor_to_world = sensor_to_world
             response = point_cloud_service(request)
-        except rospy.ServiceException as exc:
-            print("WARNING: Point cloud service did not process request: {}".format(str(exc)))
-            print("WARNING: Trying to reconnect to service")
+        except (rospy.ServiceException, rospy.exceptions.TransportTerminated) as exc:
+            rospy.logwarn("WARNING: Point cloud service did not process request: {}".format(str(exc)))
+            rospy.logwarn("WARNING: Trying to reconnect to service")
             point_cloud_service = rospy.ServiceProxy(point_cloud_topic, InsertPointCloud, persistent=True)
         else:
-            print("Integrating point cloud took {}s".format(response.elapsed_seconds))
-            print("Received reward: {}".format(response.reward))
+            rospy.loginfo("Integrating point cloud took {}s".format(response.elapsed_seconds))
+            rospy.loginfo("Received reward: {}".format(response.reward))
 
         rate.sleep()
 
 
 if __name__ == '__main__':
     engine = UnrealCVWrapper()
-    rospy.wait_for_service('insert_point_cloud')
     point_cloud_topic = 'insert_point_cloud'
     location_origin = np.array([0, 0, 0])
     rospy.init_node('test_mapping', anonymous=False)

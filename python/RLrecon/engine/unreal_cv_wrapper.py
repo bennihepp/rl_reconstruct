@@ -11,6 +11,11 @@ class UnrealCVWrapper:
     class Exception(BaseException):
         pass
 
+    class RaycastResult(object):
+
+        def __init__(self):
+            self.expected_reward = 0
+
     def __init__(self, address=None, port=None):
         if address is None:
             address = '127.0.0.1'
@@ -116,9 +121,18 @@ class UnrealCVWrapper:
         # Convert left-handed Unreal system to right-handed system
         yaw = -yaw
         pitch = -pitch
-        quat = transformations.quaternion_from_euler(roll, pitch, yaw, 'rxyz')
-        quat2 = transformations.quaternion_from_euler(yaw, pitch, roll, 'rzyx')
-        print('quat={}, quat2={}'.format(quat, quat2))
+        # quat = transformations.quaternion_from_euler(roll, pitch, yaw, 'rxyz')
+        quat = transformations.quaternion_from_euler(yaw, pitch, roll, 'rzyx')
+
+        # # Transformation test
+        # transform_mat = transformations.quaternion_matrix(quat)
+        # sensor_x = transform_mat[:3, :3].dot(np.array([1, 0, 0]))
+        # sensor_y = transform_mat[:3, :3].dot(np.array([0, 1, 0]))
+        # sensor_z = transform_mat[:3, :3].dot(np.array([0, 0, 1]))
+        # rospy.loginfo("sensor x axis: {} {} {}".format(sensor_x[0], sensor_x[1], sensor_x[2]))
+        # rospy.loginfo("sensor y axis: {} {} {}".format(sensor_y[0], sensor_y[1], sensor_y[2]))
+        # rospy.loginfo("sensor z axis: {} {} {}".format(sensor_z[0], sensor_z[1], sensor_z[2]))
+
         return quat
 
     """Return the current pose as a tuple of location and orientation quaternion"""

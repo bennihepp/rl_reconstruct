@@ -28,6 +28,9 @@
  */
 
 #include <octomap_server_ext/OctomapServerExt.h>
+#include <iostream>
+#include <sstream>
+#include <bh/common.h>
 
 using namespace octomap;
 using octomap_msgs::Octomap;
@@ -68,7 +71,9 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   m_groundFilterDistance(0.04), m_groundFilterAngle(0.15), m_groundFilterPlaneDistance(0.07),
   m_compressMap(true),
   m_incrementalUpdate(false),
-  m_initConfig(true)
+  m_initConfig(true),
+  m_useSurfaceVoxelsForReward(true),
+  m_reward(0)
 {
   double probHit, probMiss, thresMin, thresMax;
 
@@ -166,6 +171,22 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   } else
     ROS_INFO("Publishing non-latched (topics are only prepared as needed, will only be re-published on map change");
 
+  private_nh.param("use_surface_voxels_for_reward", m_useSurfaceVoxelsForReward, m_useSurfaceVoxelsForReward);
+  private_nh.param("surface_voxel_filename", m_surfaceVoxelsFilename, m_surfaceVoxelsFilename);
+  if (m_surfaceVoxelsFilename.empty()) {
+    ROS_WARN("No surface voxel file specified");
+    m_useSurfaceVoxelsForReward = false;
+  }
+  else {
+    ROS_INFO_STREAM("surface_voxel_filename: " << m_surfaceVoxelsFilename);
+    readSurfaceVoxels(m_surfaceVoxelsFilename);
+  }
+
+  m_voxelFreeThreshold = 0.2f;
+  m_voxelOccupiedThreshold = m_octree->getOccupancyThres();
+  m_rewardPerFreeVoxel = 0.1;
+  m_rewardPerOccupiedVoxel = 1.0;
+
   m_markerPub = m_nh.advertise<visualization_msgs::MarkerArray>("occupied_cells_vis_array", 1, m_latchedTopics);
   m_binaryMapPub = m_nh.advertise<Octomap>("octomap_binary", 1, m_latchedTopics);
   m_fullMapPub = m_nh.advertise<Octomap>("octomap_full", 1, m_latchedTopics);
@@ -178,6 +199,7 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   m_tfPointCloudSub->registerCallback(boost::bind(&OctomapServerExt::insertCloudCallback, this, _1));
 
   m_insertPointCloudService = m_nh.advertiseService("insert_point_cloud", &OctomapServerExt::insertPointCloudSrv, this);
+  m_raycastCameraService = m_nh.advertiseService("raycast_camera", &OctomapServerExt::raycastCameraSrv, this);
 
   m_octomapBinaryService = m_nh.advertiseService("octomap_binary", &OctomapServerExt::octomapBinarySrv, this);
   m_octomapFullService = m_nh.advertiseService("octomap_full", &OctomapServerExt::octomapFullSrv, this);
@@ -255,10 +277,80 @@ bool OctomapServerExt::openFile(const std::string& filename){
   m_updateBBXMax[1] = m_octree->coordToKey(maxY);
   m_updateBBXMax[2] = m_octree->coordToKey(maxZ);
 
+  readSurfaceVoxels(m_surfaceVoxelsFilename);
+  m_reward = computeReward();
+
   publishAll();
 
   return true;
 
+}
+
+void OctomapServerExt::readSurfaceVoxels(const std::string& filename) {
+  m_surfaceVoxels.clear();
+  std::ifstream in(filename);
+  if (!in) {
+    throw std::runtime_error("ERROR: Unable to open surface voxel file: " + filename);
+  }
+  std::string line_str;
+  while (std::getline(in, line_str)) {
+    if (line_str.empty()) {
+      continue;
+    }
+    std::istringstream in_str(line_str);
+    float x, y, z;
+    in_str >> x >> y >> z;
+    octomath::Vector3 voxel(x, y, z);
+    m_surfaceVoxels.push_back(voxel);
+//    ROS_DEBUG_STREAM("Surface voxel: " << voxel(0) << ", " << voxel(1) << ", " << voxel(2));
+  }
+  in.close();
+  m_surfaceVoxelKeys.clear();
+  std::transform(m_surfaceVoxels.begin(), m_surfaceVoxels.end(), std::back_inserter(m_surfaceVoxelKeys),
+                 [&](const octomath::Vector3& voxel) {
+                     const OcTreeKey key = m_octree->coordToKey(voxel);
+                     return key;
+                 });
+  ROS_INFO_STREAM("Read " << m_surfaceVoxels.size() << " surface voxels");
+}
+
+double OctomapServerExt::computeReward() const {
+  double reward = 0;
+  std::size_t occupied_count = 0;
+  std::size_t free_count = 0;
+  if (m_useSurfaceVoxelsForReward) {
+    for (const OcTreeKey &key : m_surfaceVoxelKeys) {
+      //  for (const octomath::Vector3& voxel : m_surfaceVoxels) {
+      const OcTreeNode *node = m_octree->search(key);
+      //    const OcTreeNode* node = m_octree->search(voxel);
+      if (node != nullptr) {
+        //      ROS_INFO_STREAM("Found node at key " << key[0] << ", " << key[1] << ", " << key[2]);
+        //      ROS_INFO_STREAM("Found node at voxel " << voxel(0) << ", " << voxel(1) << ", " << voxel(2));
+        if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
+          reward += m_rewardPerOccupiedVoxel;
+          ++occupied_count;
+        } else if (node->getOccupancy() <= m_voxelFreeThreshold) {
+          reward += m_rewardPerFreeVoxel;
+          ++free_count;
+        }
+      }
+    }
+  }
+  else {
+    // Alternative computation (considering all voxels)
+    for (auto it = m_octree->begin_leafs(); it != m_octree->end_leafs(); ++it) {
+      if (it->getOccupancy() >= m_voxelOccupiedThreshold) {
+        reward += m_rewardPerOccupiedVoxel;
+        ++occupied_count;
+      } else if (it->getOccupancy() <= m_voxelFreeThreshold) {
+        reward += m_rewardPerFreeVoxel;
+        ++free_count;
+      }
+    }
+  }
+  ROS_DEBUG_STREAM("occupied voxels: " << occupied_count << ", free voxels: " << free_count);
+  ROS_DEBUG_STREAM("reward is " << reward);
+  return reward;
 }
 
 void OctomapServerExt::filterHeightPointCloud(PCLPointCloud& pc) {
@@ -396,10 +488,108 @@ bool OctomapServerExt::insertPointCloudSrv(InsertPointCloud::Request &req, Inser
   double total_elapsed = (ros::WallTime::now() - startTime).toSec();
   ROS_DEBUG("Pointcloud insertion in OctomapServerExt done (%zu pts, %f sec)", pc.size(), total_elapsed);
 
+  m_reward = computeReward();
+
   publishAll(req.point_cloud.header.stamp);
 
   res.elapsed_seconds = total_elapsed;
-  res.reward = 0;
+  res.reward = m_reward;
+  return true;
+}
+
+OctomapServerExt::RaycastResult OctomapServerExt::raycastCamera(
+        const tf::Transform& sensor_to_world_tf,
+        const int height, const int width,
+        const float focal_length, const bool ignore_unknown_voxels) {
+  const point3d sensor_origin  = pointTfToOctomap(sensor_to_world_tf.getOrigin());
+  const octomath::Quaternion sensor_orientation = quaternionTfToOctomap(sensor_to_world_tf.getRotation());
+  // Camera system: z forward, x right, y down. Transfom sensor_orientation accordingly
+//  ROS_INFO_STREAM("sensor_x_axis: " << sensor_orientation.rotate(octomath::Vector3(1, 0, 0)));
+//  ROS_INFO_STREAM("sensor_y_axis: " << sensor_orientation.rotate(octomath::Vector3(0, 1, 0)));
+//  ROS_INFO_STREAM("sensor_z_axis: " << sensor_orientation.rotate(octomath::Vector3(0, 0, 1)));
+  octomath::Quaternion camera_orientation = sensor_orientation;
+  camera_orientation = camera_orientation * octomath::Quaternion(octomath::Vector3(0, 0, 1), M_PI / 2);
+  camera_orientation = camera_orientation * octomath::Quaternion(octomath::Vector3(1, 0, 0), M_PI / 2);
+//  ROS_INFO_STREAM("camera_x_axis: " << camera_orientation.rotate(octomath::Vector3(1, 0, 0)));
+//  ROS_INFO_STREAM("camera_y_axis: " << camera_orientation.rotate(octomath::Vector3(0, 1, 0)));
+//  ROS_INFO_STREAM("camera_z_axis: " << camera_orientation.rotate(octomath::Vector3(0, 0, 1)));
+
+  if (!m_octree->coordToKeyChecked(sensor_origin, m_updateBBXMin)
+      || !m_octree->coordToKeyChecked(sensor_origin, m_updateBBXMax)) {
+    ROS_ERROR_STREAM("Could not generate Key for sensor origin " << sensor_origin);
+  }
+
+  RaycastResult rr;
+  rr.num_hits_occupied = 0;
+  rr.num_hits_unknown = 0;
+  rr.expected_reward = 0;
+
+  const int center_y = height / 2;
+  const int center_x = width / 2;
+  KeySet free_cells, occupied_cells;
+  for (int y = 0; y < height; ++y) {
+    for (int x = 0; x < width; ++x) {
+//      // Camera coordinate system (x-axis forward, z-axis up, y-axis left)
+//      const octomath::Vector3 ray_direction_sensor(
+//              1,
+//              -(x - center_x) / focal_length,
+//              (y - center_y) / focal_length);
+//      const octomath::Vector3 ray_direction_world = sensor_orientation.rotate(ray_direction_sensor);
+      const octomath::Vector3 ray_direction_sensor(
+              (x - center_x) / focal_length,
+              (y - center_y) / focal_length,
+              1.0);
+      const octomath::Vector3 ray_direction_world = camera_orientation.rotate(ray_direction_sensor);
+      octomath::Vector3 end_point;
+      const bool hit_occupied = m_octree->castRay(sensor_origin, ray_direction_world, end_point,
+      ignore_unknown_voxels, m_maxRange);
+      if (hit_occupied) {
+        ++rr.num_hits_occupied;
+        rr.point_cloud.push_back(pcl::PointXYZ(end_point(0), end_point(1), end_point(2)));
+      }
+      else {
+        const OcTreeNode* node = m_octree->search(end_point);
+        if (node == nullptr) {
+          ++rr.num_hits_unknown;
+        }
+        else {
+          if (node->getOccupancy() > m_voxelFreeThreshold) {
+            if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
+              ROS_WARN_STREAM("End-voxel should be non-occupied, but occupancy is " << node->getOccupancy());
+            }
+            ++rr.num_hits_unknown;
+          }
+        }
+      }
+    }
+  }
+  return rr;
+}
+
+bool OctomapServerExt::raycastCameraSrv(RaycastCamera::Request &req, RaycastCamera::Response &res) {
+  ros::WallTime startTime = ros::WallTime::now();
+
+  tf::Transform sensor_to_world_tf;
+  tf::transformMsgToTF(req.sensor_to_world, sensor_to_world_tf);
+  Eigen::Matrix4f sensor_to_world;
+  pcl_ros::transformAsMatrix(sensor_to_world_tf, sensor_to_world);
+
+  const int height = req.height;
+  const int width = req.width;
+  const float focal_length = req.focal_length;
+  const bool ignore_unknown_voxels = req.ignore_unknown_voxels;
+
+  const RaycastResult rr = raycastCamera(sensor_to_world_tf, height, width, focal_length, ignore_unknown_voxels);
+
+  double total_elapsed = (ros::WallTime::now() - startTime).toSec();
+  ROS_DEBUG("Raycast took %f sec", total_elapsed);
+
+  res.elapsed_seconds = total_elapsed;
+  res.num_hits_occupied = rr.num_hits_occupied;
+  res.num_hits_unknown = rr.num_hits_unknown;
+  res.expected_reward = rr.expected_reward;
+  pcl::toROSMsg(rr.point_cloud, res.point_cloud);
+
   return true;
 }
 
@@ -511,7 +701,7 @@ void OctomapServerExt::insertScan(const tf::Point& sensorOriginTf, const PCLPoin
 #endif
 }
 
-void OctomapServerExt::insertScan(const tf::Point& sensorOriginTf, const PCLPointCloud& ground, const PCLPointCloud& nonground){
+void OctomapServerExt::insertScan(const tf::Point& sensorOriginTf, const PCLPointCloud& ground, const PCLPointCloud& nonground) {
   point3d sensorOrigin = pointTfToOctomap(sensorOriginTf);
 
   if (!m_octree->coordToKeyChecked(sensorOrigin, m_updateBBXMin)
@@ -640,8 +830,6 @@ void OctomapServerExt::insertScan(const tf::Point& sensorOriginTf, const PCLPoin
   }
 #endif
 }
-
-
 
 void OctomapServerExt::publishAll(const ros::Time& rostime){
   ros::WallTime startTime = ros::WallTime::now();

@@ -31,6 +31,8 @@
 #include <octomap_msgs/conversions.h>
 #include <octomap/octomap.h>
 #include <fstream>
+#include <bh/mLib/mLibCoreMesh.h>
+#include <bh/mLib/mLibUtils.h>
 
 #include <octomap_msgs/GetOctomap.h>
 using octomap_msgs::GetOctomap;
@@ -86,6 +88,45 @@ public:
           ROS_ERROR("Unknown file extension, must be either .bt or .ot");
         }
 
+        // Write occupied voxels as mesh
+        OcTree* occ_octree = dynamic_cast<OcTree*>(tree);
+        const OcTreeKey key1 = occ_octree->coordToKey(0, 0, 0);
+        const OcTreeKey key2 = occ_octree->coordToKey(0.2, 0, 0);
+        const OcTreeKey key3 = occ_octree->coordToKey(0, 0.2, 0);
+        const OcTreeKey key4 = occ_octree->coordToKey(0, 0, 0.2);
+        ROS_WARN_STREAM("key1=" << key1[0] << ", " << key1[1] << ", " << key1[2]);
+        ROS_WARN_STREAM("key2=" << key2[0] << ", " << key2[1] << ", " << key2[2]);
+        ROS_WARN_STREAM("key3=" << key3[0] << ", " << key3[1] << ", " << key3[2]);
+        ROS_WARN_STREAM("key4=" << key4[0] << ", " << key4[1] << ", " << key4[2]);
+        const octomath::Vector3 coord1 = occ_octree->keyToCoord(key1);
+        const octomath::Vector3 coord2 = occ_octree->keyToCoord(key2);
+        const octomath::Vector3 coord3 = occ_octree->keyToCoord(key3);
+        const octomath::Vector3 coord4 = occ_octree->keyToCoord(key4);
+        ROS_WARN_STREAM("coord1=" << coord1(0) << ", " << coord1(1) << ", " << coord1(2));
+        ROS_WARN_STREAM("coord2=" << coord2(0) << ", " << coord2(1) << ", " << coord2(2));
+        ROS_WARN_STREAM("coord3=" << coord3(0) << ", " << coord3(1) << ", " << coord3(2));
+        ROS_WARN_STREAM("coord4=" << coord4(0) << ", " << coord4(1) << ", " << coord4(2));
+        if (occ_octree == nullptr) {
+          ROS_WARN("Cannot convert octree to occupancy octree (OcTree)");
+        }
+        else {
+          std::string mesh_output_filename = mapname + ".ply";
+          std::vector<ml::TriMeshf> output_meshes;
+          for (auto it = occ_octree->begin_leafs(); it != occ_octree->end_leafs(); ++it) {
+            if (it->getOccupancy() >= occ_octree->getOccupancyThres()) {
+              const octomath::Vector3 &voxel = it.getCoordinate();
+              ROS_INFO_STREAM("voxel: " << voxel(0) << ", " << voxel(1) << ", " << voxel(2));
+              const float size = it.getSize();
+              const ml::BoundingBox3f ml_bbox(
+                      ml::vec3f(voxel(0) - size / 2, voxel(1) - size / 2, voxel(2) - size / 2),
+                      ml::vec3f(voxel(0) + size / 2, voxel(1) + size / 2, voxel(2) + size / 2));
+              const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox);
+              output_meshes.push_back(output_mesh);
+            }
+          }
+          const ml::TriMeshf output_mesh = ml::Shapesf::unifyMeshes(output_meshes);
+          ml::MeshIOf::saveToPLY(mesh_output_filename, output_mesh.getMeshData());
+        }
 
       } else{
         ROS_ERROR("Error reading OcTree from stream");
