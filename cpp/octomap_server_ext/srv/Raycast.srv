@@ -1,7 +1,4 @@
-geometry_msgs/Transform sensor_to_world
-int32 height
-int32 width
-float32 focal_length
+Ray[] rays
 bool ignore_unknown_voxels
 float32 max_range
 ---

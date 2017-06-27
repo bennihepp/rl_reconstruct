@@ -72,8 +72,8 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   m_compressMap(true),
   m_incrementalUpdate(false),
   m_initConfig(true),
-  m_useSurfaceVoxelsForReward(true),
-  m_reward(0)
+  m_useOnlySurfaceVoxelsForScore(true),
+  m_score(0)
 {
   double probHit, probMiss, thresMin, thresMax;
 
@@ -171,21 +171,26 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   } else
     ROS_INFO("Publishing non-latched (topics are only prepared as needed, will only be re-published on map change");
 
-  private_nh.param("use_surface_voxels_for_reward", m_useSurfaceVoxelsForReward, m_useSurfaceVoxelsForReward);
+  private_nh.param("use_only_surface_voxels_for_score", m_useOnlySurfaceVoxelsForScore, m_useOnlySurfaceVoxelsForScore);
   private_nh.param("surface_voxel_filename", m_surfaceVoxelsFilename, m_surfaceVoxelsFilename);
   if (m_surfaceVoxelsFilename.empty()) {
     ROS_WARN("No surface voxel file specified");
-    m_useSurfaceVoxelsForReward = false;
+    m_useOnlySurfaceVoxelsForScore = false;
   }
   else {
     ROS_INFO_STREAM("surface_voxel_filename: " << m_surfaceVoxelsFilename);
     readSurfaceVoxels(m_surfaceVoxelsFilename);
   }
 
-  m_voxelFreeThreshold = 0.2f;
-  m_voxelOccupiedThreshold = m_octree->getOccupancyThres();
-  m_rewardPerFreeVoxel = 0.1;
-  m_rewardPerOccupiedVoxel = 1.0;
+  m_voxelFreeThreshold = 0.25f;
+  m_voxelOccupiedThreshold = 0.75f;
+  m_scorePerVoxel = 0.1;
+  m_scorePerSurfaceVoxel = 1.0;
+  private_nh.param("voxel_free_threshold", m_voxelFreeThreshold, m_voxelFreeThreshold);
+  private_nh.param("voxel_occupied_threshold", m_voxelOccupiedThreshold, m_voxelOccupiedThreshold);
+  private_nh.param("score_per_voxel", m_scorePerVoxel, m_scorePerVoxel);
+  private_nh.param("score_per_surface_voxel", m_scorePerSurfaceVoxel, m_scorePerSurfaceVoxel);
+  ROS_INFO_STREAM("m_voxelOccupiedThreshold=" << m_voxelOccupiedThreshold);
 
   m_markerPub = m_nh.advertise<visualization_msgs::MarkerArray>("occupied_cells_vis_array", 1, m_latchedTopics);
   m_binaryMapPub = m_nh.advertise<Octomap>("octomap_binary", 1, m_latchedTopics);
@@ -198,12 +203,15 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   m_tfPointCloudSub = new tf::MessageFilter<sensor_msgs::PointCloud2> (*m_pointCloudSub, m_tfListener, m_worldFrameId, 5);
   m_tfPointCloudSub->registerCallback(boost::bind(&OctomapServerExt::insertCloudCallback, this, _1));
 
+  m_clearBoundingBoxService = m_nh.advertiseService("clear_bounding_box", &OctomapServerExt::clearBoundingBoxSrv, this);
+  m_overrideBoundingBoxService = m_nh.advertiseService("override_bounding_box", &OctomapServerExt::overrideBoundingBoxSrv, this);
   m_insertPointCloudService = m_nh.advertiseService("insert_point_cloud", &OctomapServerExt::insertPointCloudSrv, this);
+  m_queryVoxelsService = m_nh.advertiseService("query_voxels", &OctomapServerExt::queryVoxelsSrv, this);
+  m_raycastService = m_nh.advertiseService("raycast", &OctomapServerExt::raycastSrv, this);
   m_raycastCameraService = m_nh.advertiseService("raycast_camera", &OctomapServerExt::raycastCameraSrv, this);
 
   m_octomapBinaryService = m_nh.advertiseService("octomap_binary", &OctomapServerExt::octomapBinarySrv, this);
   m_octomapFullService = m_nh.advertiseService("octomap_full", &OctomapServerExt::octomapFullSrv, this);
-  m_clearBBXService = private_nh.advertiseService("clear_bbx", &OctomapServerExt::clearBBXSrv, this);
   m_resetService = private_nh.advertiseService("reset", &OctomapServerExt::resetSrv, this);
 
   dynamic_reconfigure::Server<OctomapServerExtConfig>::CallbackType f;
@@ -278,7 +286,7 @@ bool OctomapServerExt::openFile(const std::string& filename){
   m_updateBBXMax[2] = m_octree->coordToKey(maxZ);
 
   readSurfaceVoxels(m_surfaceVoxelsFilename);
-  m_reward = computeReward();
+  m_score = computeScore();
 
   publishAll();
 
@@ -306,7 +314,8 @@ void OctomapServerExt::readSurfaceVoxels(const std::string& filename) {
   }
   in.close();
   m_surfaceVoxelKeys.clear();
-  std::transform(m_surfaceVoxels.begin(), m_surfaceVoxels.end(), std::back_inserter(m_surfaceVoxelKeys),
+  std::transform(m_surfaceVoxels.begin(), m_surfaceVoxels.end(),
+                 std::inserter(m_surfaceVoxelKeys, m_surfaceVoxelKeys.end()),
                  [&](const octomath::Vector3& voxel) {
                      const OcTreeKey key = m_octree->coordToKey(voxel);
                      return key;
@@ -314,24 +323,25 @@ void OctomapServerExt::readSurfaceVoxels(const std::string& filename) {
   ROS_INFO_STREAM("Read " << m_surfaceVoxels.size() << " surface voxels");
 }
 
-double OctomapServerExt::computeReward() const {
-  double reward = 0;
+double OctomapServerExt::computeScore() const {
+  double score = 0;
   std::size_t occupied_count = 0;
   std::size_t free_count = 0;
-  if (m_useSurfaceVoxelsForReward) {
+  if (m_useOnlySurfaceVoxelsForScore) {
     for (const OcTreeKey &key : m_surfaceVoxelKeys) {
-      //  for (const octomath::Vector3& voxel : m_surfaceVoxels) {
       const OcTreeNode *node = m_octree->search(key);
-      //    const OcTreeNode* node = m_octree->search(voxel);
       if (node != nullptr) {
-        //      ROS_INFO_STREAM("Found node at key " << key[0] << ", " << key[1] << ", " << key[2]);
-        //      ROS_INFO_STREAM("Found node at voxel " << voxel(0) << ", " << voxel(1) << ", " << voxel(2));
-        if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
-          reward += m_rewardPerOccupiedVoxel;
-          ++occupied_count;
-        } else if (node->getOccupancy() <= m_voxelFreeThreshold) {
-          reward += m_rewardPerFreeVoxel;
-          ++free_count;
+        // Is voxel already known with certainty?
+        if (node->getOccupancy() >= m_voxelOccupiedThreshold || node->getOccupancy() <= m_voxelFreeThreshold) {
+          // Update counts
+          if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
+            ++occupied_count;
+          }
+          else {
+            ++free_count;
+          }
+          // Update score
+          score += m_scorePerSurfaceVoxel;
         }
       }
     }
@@ -339,18 +349,27 @@ double OctomapServerExt::computeReward() const {
   else {
     // Alternative computation (considering all voxels)
     for (auto it = m_octree->begin_leafs(); it != m_octree->end_leafs(); ++it) {
-      if (it->getOccupancy() >= m_voxelOccupiedThreshold) {
-        reward += m_rewardPerOccupiedVoxel;
-        ++occupied_count;
-      } else if (it->getOccupancy() <= m_voxelFreeThreshold) {
-        reward += m_rewardPerFreeVoxel;
-        ++free_count;
+      // Is voxel already known with certainty?
+      if (it->getOccupancy() >= m_voxelOccupiedThreshold || it->getOccupancy() <= m_voxelFreeThreshold) {
+        // Update counts
+        if (it->getOccupancy() >= m_voxelOccupiedThreshold) {
+          ++occupied_count;
+        } else {
+          ++free_count;
+        }
+        // Compute score contribution
+        const bool is_surface_voxel = m_surfaceVoxelKeys.find(it.getKey()) != m_surfaceVoxelKeys.end();
+        if (is_surface_voxel) {
+          score += m_scorePerSurfaceVoxel;
+        } else {
+          score += m_scorePerVoxel;
+        }
       }
     }
   }
   ROS_DEBUG_STREAM("occupied voxels: " << occupied_count << ", free voxels: " << free_count);
-  ROS_DEBUG_STREAM("reward is " << reward);
-  return reward;
+  ROS_DEBUG_STREAM("score is " << score);
+  return score;
 }
 
 void OctomapServerExt::filterHeightPointCloud(PCLPointCloud& pc) {
@@ -488,19 +507,211 @@ bool OctomapServerExt::insertPointCloudSrv(InsertPointCloud::Request &req, Inser
   double total_elapsed = (ros::WallTime::now() - startTime).toSec();
   ROS_DEBUG("Pointcloud insertion in OctomapServerExt done (%zu pts, %f sec)", pc.size(), total_elapsed);
 
-  m_reward = computeReward();
+  const double old_score = m_score;
+  m_score = computeScore();
 
   publishAll(req.point_cloud.header.stamp);
 
   res.elapsed_seconds = total_elapsed;
-  res.reward = m_reward;
+  res.score = m_score;
+  res.reward = m_score - old_score;
   return true;
+}
+
+void OctomapServerExt::overrideBoundingBox(const octomath::Vector3& min, const octomath::Vector3& max,
+                                           const double occupancy, const bool densify) {
+  const float logodds = octomap::logodds(occupancy);
+  const float unknown_logodds_update = logodds - octomap::logodds(0.5);
+  const bool lazy_eval = false;
+  if (densify) {
+    OcTreeKey min_key = m_octree->coordToKey(min);
+    OcTreeKey max_key = m_octree->coordToKey(max);
+    octomath::Vector3 min_ = m_octree->keyToCoord(min_key);
+    octomath::Vector3 max_ = m_octree->keyToCoord(max_key);
+    for (key_type a = min_key[0]; a <= max_key[0]; ++a) {
+      for (key_type b = min_key[1]; b <= max_key[1]; ++b) {
+        for (key_type c = min_key[2]; c <= max_key[2]; ++c) {
+          const OcTreeKey key(a, b, c);
+          OcTreeNode* node = m_octree->search(key);
+          if (node == nullptr) {
+            m_octree->updateNode(key, unknown_logodds_update, lazy_eval);
+          }
+          else {
+            node->setLogOdds(logodds);
+          }
+        }
+      }
+    }
+//    for (double x = min_(0); x <= max_(0); x += m_octree->getResolution()) {
+//      for (double y = min_(1); y <= max_(1); y += m_octree->getResolution()) {
+//        for (double z = min_(2); z <= max_(2); z += m_octree->getResolution()) {
+//          const octomath::Vector3 coord(x, y, z);
+//          const OcTreeKey key = m_octree->coordToKey(coord);
+//          OcTreeNode* node = m_octree->search(key);
+//          if (node == nullptr) {
+//            m_octree->updateNode(key, unknown_logodds_update, lazy_eval);
+//          }
+//          else {
+//            node->setLogOdds(logodds);
+//          }
+//        }
+//      }
+//    }
+  }
+  else {
+    for (OcTreeT::leaf_bbx_iterator it = m_octree->begin_leafs_bbx(min, max),
+                 end = m_octree->end_leafs_bbx(); it != end; ++it) {
+      it->setLogOdds(logodds);
+    }
+  }
+  m_octree->updateInnerOccupancy();
+}
+
+OctomapServerExt::QueryVoxelsResult OctomapServerExt::queryVoxels(const std::vector<octomath::Vector3>& voxels) {
+  QueryVoxelsResult qr;
+  qr.num_occupied = 0;
+  qr.num_free = 0;
+  qr.num_unknown = 0;
+  qr.expected_reward = 0;
+  // Initialize point cloud
+  qr.point_cloud.header.frame_id = m_worldFrameId;
+  qr.point_cloud.header.stamp = static_cast<uint32_t>(ros::Time::now().toNSec() / 1000);
+  qr.point_cloud.width = voxels.size();
+  qr.point_cloud.height = 1;
+  qr.point_cloud.is_dense = false;
+  qr.point_cloud.points.clear();
+
+  KeySet free_cells, occupied_cells, unknown_cells;
+  for (std::size_t i = 0; i < voxels.size(); ++i) {
+    const octomath::Vector3& voxel = voxels[i];
+    const OcTreeKey key = m_octree->coordToKey(voxel);
+    const OcTreeNode* node = m_octree->search(key);
+    const bool is_known_voxel = node != nullptr;
+    if (is_known_voxel) {
+      if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
+        occupied_cells.insert(key);
+      }
+      else if (node->getOccupancy() <= m_voxelFreeThreshold) {
+        free_cells.insert(key);
+      }
+      else {
+        unknown_cells.insert(key);
+      }
+    }
+    else {
+      unknown_cells.insert(key);
+    }
+    const bool is_surface_voxel = m_surfaceVoxelKeys.find(key) != m_surfaceVoxelKeys.end();
+    PointXYZExt point;
+    point.x = voxel(0);
+    point.y = voxel(1);
+    point.z = voxel(2);
+    point.is_surface = is_surface_voxel;
+    point.is_known = is_known_voxel;
+    if (is_known_voxel) {
+      point.occupancy = node->getOccupancy();
+    }
+    else {
+      point.occupancy = -1;
+    }
+    qr.point_cloud.push_back(point);
+  }
+  qr.num_occupied = occupied_cells.size();
+  qr.num_free = free_cells.size();
+  qr.num_unknown = unknown_cells.size();
+  for (const OcTreeKey& key : unknown_cells) {
+    const bool is_surface_voxel = m_surfaceVoxelKeys.find(key) != m_surfaceVoxelKeys.end();
+    const bool use_for_reward = !m_useOnlySurfaceVoxelsForScore || is_surface_voxel;
+    if (use_for_reward) {
+      if (is_surface_voxel) {
+        qr.expected_reward += m_scorePerSurfaceVoxel;
+      } else {
+        qr.expected_reward += m_scorePerVoxel;
+      }
+    }
+  }
+  return qr;
+}
+
+OctomapServerExt::RaycastResult OctomapServerExt::raycast(
+        const std::vector<Ray>& rays,
+        const bool ignore_unknown_voxels,
+        const float max_range) {
+  const float max_raycast_range = max_range;
+
+  RaycastResult rr;
+  rr.num_hits_occupied = 0;
+  rr.num_hits_free = 0;
+  rr.num_hits_unknown = 0;
+  rr.expected_reward = 0;
+  // Initialize point cloud
+  rr.point_cloud.header.frame_id = m_worldFrameId;
+  rr.point_cloud.header.stamp = static_cast<uint32_t>(ros::Time::now().toNSec() / 1000);
+  rr.point_cloud.width = rays.size();
+  rr.point_cloud.height = 1;
+  rr.point_cloud.is_dense = false;
+  rr.point_cloud.points.clear();
+
+  KeySet free_cells, occupied_cells, unknown_cells;
+  for (std::size_t i = 0; i < rays.size(); ++i) {
+    const Ray& ray = rays[i];
+    octomath::Vector3 end_point;
+    const bool hit_occupied = m_octree->castRay(ray.origin, ray.direction, end_point,
+    ignore_unknown_voxels, max_raycast_range);
+    const OcTreeKey end_key = m_octree->coordToKey(end_point);
+    const OcTreeNode* end_node = m_octree->search(end_key);
+    const bool is_known_voxel = end_node != nullptr;
+    if (is_known_voxel) {
+      if (end_node->getOccupancy() >= m_voxelOccupiedThreshold) {
+        occupied_cells.insert(end_key);
+      }
+      else if (end_node->getOccupancy() <= m_voxelFreeThreshold) {
+        free_cells.insert(end_key);
+      }
+      else {
+        unknown_cells.insert(end_key);
+      }
+    }
+    else {
+      unknown_cells.insert(end_key);
+    }
+    const bool is_surface_voxel = m_surfaceVoxelKeys.find(end_key) != m_surfaceVoxelKeys.end();
+    PointXYZExt point;
+    point.x = end_point(0);
+    point.y = end_point(1);
+    point.z = end_point(2);
+    point.is_surface = is_surface_voxel;
+    point.is_known = is_known_voxel;
+    if (is_known_voxel) {
+      point.occupancy = end_node->getOccupancy();
+    }
+    else {
+      point.occupancy = -1;
+    }
+    rr.point_cloud.push_back(point);
+  }
+  rr.num_hits_occupied = occupied_cells.size();
+  rr.num_hits_free = free_cells.size();
+  rr.num_hits_unknown = unknown_cells.size();
+  for (const OcTreeKey& key : unknown_cells) {
+    const bool is_surface_voxel = m_surfaceVoxelKeys.find(key) != m_surfaceVoxelKeys.end();
+    const bool use_for_reward = !m_useOnlySurfaceVoxelsForScore || is_surface_voxel;
+    if (use_for_reward) {
+      if (is_surface_voxel) {
+        rr.expected_reward += m_scorePerSurfaceVoxel;
+      } else {
+        rr.expected_reward += m_scorePerVoxel;
+      }
+    }
+  }
+  return rr;
 }
 
 OctomapServerExt::RaycastResult OctomapServerExt::raycastCamera(
         const tf::Transform& sensor_to_world_tf,
         const int height, const int width,
-        const float focal_length, const bool ignore_unknown_voxels) {
+        const float focal_length, const bool ignore_unknown_voxels,
+        const float max_range) {
   const point3d sensor_origin  = pointTfToOctomap(sensor_to_world_tf.getOrigin());
   const octomath::Quaternion sensor_orientation = quaternionTfToOctomap(sensor_to_world_tf.getRotation());
   // Camera system: z forward, x right, y down. Transfom sensor_orientation accordingly
@@ -519,14 +730,24 @@ OctomapServerExt::RaycastResult OctomapServerExt::raycastCamera(
     ROS_ERROR_STREAM("Could not generate Key for sensor origin " << sensor_origin);
   }
 
+  const float max_raycast_range = max_range;
+
   RaycastResult rr;
   rr.num_hits_occupied = 0;
+  rr.num_hits_free = 0;
   rr.num_hits_unknown = 0;
   rr.expected_reward = 0;
+  // Initialize point cloud
+  rr.point_cloud.header.frame_id = m_worldFrameId;
+  rr.point_cloud.header.stamp = static_cast<uint32_t>(ros::Time::now().toNSec() / 1000);
+  rr.point_cloud.width = width;
+  rr.point_cloud.height = height;
+  rr.point_cloud.is_dense = false;
+  rr.point_cloud.points.clear();
 
-  const int center_y = height / 2;
-  const int center_x = width / 2;
-  KeySet free_cells, occupied_cells;
+  const double center_y = height / 2.0;
+  const double center_x = width / 2.0;
+  KeySet free_cells, occupied_cells, unknown_cells;
   for (int y = 0; y < height; ++y) {
     for (int x = 0; x < width; ++x) {
 //      // Camera coordinate system (x-axis forward, z-axis up, y-axis left)
@@ -542,28 +763,115 @@ OctomapServerExt::RaycastResult OctomapServerExt::raycastCamera(
       const octomath::Vector3 ray_direction_world = camera_orientation.rotate(ray_direction_sensor);
       octomath::Vector3 end_point;
       const bool hit_occupied = m_octree->castRay(sensor_origin, ray_direction_world, end_point,
-      ignore_unknown_voxels, m_maxRange);
-      if (hit_occupied) {
-        ++rr.num_hits_occupied;
-        rr.point_cloud.push_back(pcl::PointXYZ(end_point(0), end_point(1), end_point(2)));
-      }
-      else {
-        const OcTreeNode* node = m_octree->search(end_point);
-        if (node == nullptr) {
-          ++rr.num_hits_unknown;
+                                                  ignore_unknown_voxels, max_raycast_range);
+      const OcTreeKey end_key = m_octree->coordToKey(end_point);
+      const OcTreeNode* end_node = m_octree->search(end_key);
+      const bool is_known_voxel = end_node != nullptr;
+      // Update voxel counts
+      if (is_known_voxel) {
+        if (end_node->getOccupancy() >= m_voxelOccupiedThreshold) {
+          occupied_cells.insert(end_key);
+        }
+        else if (end_node->getOccupancy() <= m_voxelFreeThreshold) {
+          free_cells.insert(end_key);
         }
         else {
-          if (node->getOccupancy() > m_voxelFreeThreshold) {
-            if (node->getOccupancy() >= m_voxelOccupiedThreshold) {
-              ROS_WARN_STREAM("End-voxel should be non-occupied, but occupancy is " << node->getOccupancy());
-            }
-            ++rr.num_hits_unknown;
-          }
+          unknown_cells.insert(end_key);
         }
+      }
+      else {
+        unknown_cells.insert(end_key);
+      }
+      const bool is_surface_voxel = m_surfaceVoxelKeys.find(end_key) != m_surfaceVoxelKeys.end();
+      PointXYZExt point;
+      point.x = end_point(0);
+      point.y = end_point(1);
+      point.z = end_point(2);
+      point.is_surface = is_surface_voxel;
+      point.is_known = is_known_voxel;
+      if (is_known_voxel) {
+        point.occupancy = end_node->getOccupancy();
+      }
+      else {
+        point.occupancy = -1;
+      }
+      rr.point_cloud.push_back(point);
+    }
+  }
+  rr.num_hits_occupied = occupied_cells.size();
+  rr.num_hits_free = free_cells.size();
+  rr.num_hits_unknown = unknown_cells.size();
+  for (const OcTreeKey& key : unknown_cells) {
+    const bool is_surface_voxel = m_surfaceVoxelKeys.find(key) != m_surfaceVoxelKeys.end();
+    const bool use_for_reward = !m_useOnlySurfaceVoxelsForScore || is_surface_voxel;
+    if (use_for_reward) {
+      if (is_surface_voxel) {
+        rr.expected_reward += m_scorePerSurfaceVoxel;
+      } else {
+        rr.expected_reward += m_scorePerVoxel;
       }
     }
   }
   return rr;
+}
+
+bool OctomapServerExt::queryVoxelsSrv(QueryVoxels::Request &req, QueryVoxels::Response &res) {
+  ros::WallTime startTime = ros::WallTime::now();
+
+  std::vector<octomath::Vector3> voxels;
+  for (std::size_t i = 0; i < req.voxels.size(); ++i) {
+    octomath::Vector3 voxel;
+    voxel(0) = req.voxels[i].x;
+    voxel(1) = req.voxels[i].y;
+    voxel(2) = req.voxels[i].z;
+    voxels.push_back(voxel);
+  }
+
+  const QueryVoxelsResult qr = queryVoxels(voxels);
+
+  double total_elapsed = (ros::WallTime::now() - startTime).toSec();
+  ROS_DEBUG("Query voxels took %f sec", total_elapsed);
+
+  res.elapsed_seconds = total_elapsed;
+  res.num_occupied = qr.num_occupied;
+  res.num_free = qr.num_free;
+  res.num_unknown = qr.num_unknown;
+  res.expected_reward = qr.expected_reward;
+  pointCloudExtToROSMsg(qr.point_cloud, res.point_cloud);
+
+  return true;
+}
+
+bool OctomapServerExt::raycastSrv(Raycast::Request &req, Raycast::Response &res) {
+  ros::WallTime startTime = ros::WallTime::now();
+
+  std::vector<Ray> rays;
+  for (std::size_t i = 0; i < req.rays.size(); ++i) {
+    Ray ray;
+    ray.origin(0) = req.rays[i].origin.x;
+    ray.origin(1) = req.rays[i].origin.y;
+    ray.origin(2) = req.rays[i].origin.z;
+    ray.direction(0) = req.rays[i].direction.x;
+    ray.direction(1) = req.rays[i].direction.y;
+    ray.direction(2) = req.rays[i].direction.z;
+    rays.push_back(ray);
+  }
+  const bool ignore_unknown_voxels = req.ignore_unknown_voxels;
+  const float max_range = req.max_range;
+
+  const RaycastResult rr = raycast(rays, ignore_unknown_voxels, max_range);
+
+  double total_elapsed = (ros::WallTime::now() - startTime).toSec();
+  ROS_DEBUG("Raycast took %f sec", total_elapsed);
+
+  res.elapsed_seconds = total_elapsed;
+  res.num_hits_occupied = rr.num_hits_occupied;
+  res.num_hits_free = rr.num_hits_free;
+  res.num_hits_unknown = rr.num_hits_unknown;
+  res.expected_reward = rr.expected_reward;
+  pointCloudExtToROSMsg(rr.point_cloud, res.point_cloud);
+
+  return true;
 }
 
 bool OctomapServerExt::raycastCameraSrv(RaycastCamera::Request &req, RaycastCamera::Response &res) {
@@ -578,19 +886,80 @@ bool OctomapServerExt::raycastCameraSrv(RaycastCamera::Request &req, RaycastCame
   const int width = req.width;
   const float focal_length = req.focal_length;
   const bool ignore_unknown_voxels = req.ignore_unknown_voxels;
+  const float max_range = req.max_range;
 
-  const RaycastResult rr = raycastCamera(sensor_to_world_tf, height, width, focal_length, ignore_unknown_voxels);
+  const RaycastResult rr = raycastCamera(
+          sensor_to_world_tf, height, width, focal_length, ignore_unknown_voxels, max_range);
 
   double total_elapsed = (ros::WallTime::now() - startTime).toSec();
-  ROS_DEBUG("Raycast took %f sec", total_elapsed);
+  ROS_DEBUG("Raycast camera took %f sec", total_elapsed);
 
   res.elapsed_seconds = total_elapsed;
   res.num_hits_occupied = rr.num_hits_occupied;
+  res.num_hits_free = rr.num_hits_free;
   res.num_hits_unknown = rr.num_hits_unknown;
   res.expected_reward = rr.expected_reward;
-  pcl::toROSMsg(rr.point_cloud, res.point_cloud);
+  pointCloudExtToROSMsg(rr.point_cloud, res.point_cloud);
 
   return true;
+}
+
+void OctomapServerExt::pointCloudExtToROSMsg(const PointCloudExt& pcl_cloud, sensor_msgs::PointCloud2& ros_cloud) {
+  pcl_conversions::fromPCL(pcl_cloud.header.stamp, ros_cloud.header.stamp);
+  ros_cloud.header.seq = pcl_cloud.header.seq;
+  ros_cloud.header.frame_id = pcl_cloud.header.frame_id;
+  ros_cloud.width = pcl_cloud.width;
+  ros_cloud.height = pcl_cloud.height;
+  ros_cloud.point_step = sizeof(PointCloudExt::PointType);
+  ros_cloud.row_step = ros_cloud.point_step * ros_cloud.width;
+  ros_cloud.is_dense = pcl_cloud.is_dense;
+#if defined(BOOST_BIG_ENDIAN)
+  ros_cloud.is_bigendian = true;
+#elif defined(BOOST_LITTLE_ENDIAN)
+  ros_cloud.is_bigendian = false;
+#else
+#error "Unable to determine endianness"
+#endif
+  // Initialize fields array
+  ros_cloud.fields.clear ();
+//  pcl::for_each_type<typename pcl::traits::fieldList<PointCloudExt::PointType>::type>(
+//          pcl::detail::FieldAdder<PointCloudExt::PointType>(ros_cloud.fields));
+  PointCloudExt::PointType point;
+  sensor_msgs::PointField field;
+  field.name = "x";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.x) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::FLOAT32;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  field.name = "y";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.y) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::FLOAT32;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  field.name = "z";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.z) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::FLOAT32;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  field.name = "occupancy";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.occupancy) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::FLOAT32;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  field.name = "is_surface";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.is_surface) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::UINT8;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  field.name = "is_known";
+  field.offset = static_cast<uint32_t>(reinterpret_cast<uint8_t*>(&point.is_known) - reinterpret_cast<uint8_t*>(&point));
+  field.datatype = sensor_msgs::PointField::UINT8;
+  field.count = 1;
+  ros_cloud.fields.push_back(field);
+  // Copy data
+  const std::size_t data_size = sizeof(PointCloudExt::PointType) * pcl_cloud.points.size();
+  ros_cloud.data.resize(data_size);
+  std::memcpy(ros_cloud.data.data(), pcl_cloud.points.data(), data_size);
 }
 
 void OctomapServerExt::insertScan(const tf::Point& sensorOriginTf, const PCLPointCloud& pc){
@@ -1079,21 +1448,27 @@ bool OctomapServerExt::octomapFullSrv(OctomapSrv::Request  &req,
   return true;
 }
 
-bool OctomapServerExt::clearBBXSrv(BBXSrv::Request& req, BBXSrv::Response& resp){
+bool OctomapServerExt::clearBoundingBoxSrv(ClearBoundingBox::Request& req, ClearBoundingBox::Response& resp){
   point3d min = pointMsgToOctomap(req.min);
   point3d max = pointMsgToOctomap(req.max);
-
-  double thresMin = m_octree->getClampingThresMin();
-  for(OcTreeT::leaf_bbx_iterator it = m_octree->begin_leafs_bbx(min,max),
-      end=m_octree->end_leafs_bbx(); it!= end; ++it){
-
-    it->setLogOdds(octomap::logodds(thresMin));
-    //			m_octree->updateNode(it.getKey(), -6.0f);
-  }
-  // TODO: eval which is faster (setLogOdds+updateInner or updateNode)
-  m_octree->updateInnerOccupancy();
+  double occupancy = m_octree->getClampingThresMin();
+  overrideBoundingBox(min, max, occupancy, req.densify);
 
   publishAll(ros::Time::now());
+
+  resp.success = true;
+
+  return true;
+}
+
+bool OctomapServerExt::overrideBoundingBoxSrv(OverrideBoundingBox::Request& req, OverrideBoundingBox::Response& resp){
+  point3d min = pointMsgToOctomap(req.min);
+  point3d max = pointMsgToOctomap(req.max);
+  overrideBoundingBox(min, max, req.occupancy, req.densify);
+
+  publishAll(ros::Time::now());
+
+  resp.success = true;
 
   return true;
 }

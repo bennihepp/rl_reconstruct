@@ -1,0 +1,6 @@
+geometry_msgs/Point min
+geometry_msgs/Point max
+float32 occupancy
+bool densify
+---
+bool success
