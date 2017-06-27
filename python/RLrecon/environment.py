@@ -2,10 +2,11 @@ import numpy as np
 import math_utils
 
 
-class Environment(object):
-    """Environment represents the world in which an agent moves and the possible interactions.
+class BaseEnvironment(object):
+    """BaseEnvironment represents the world in which an agent moves and the interactions.
 
-    Here it combines a simulation engine (i.e. Unreal) with a mapper (i.e. OctomapExt server)
+    Here it combines a simulation engine (i.e. Unreal) with a mapper (i.e. OctomapExt server).
+    The possible actions have to be given as an argument to the constructor.
     """
 
     class State(object):
@@ -28,24 +29,20 @@ class Environment(object):
 
     def __init__(self,
                  bounding_box,
+                 action_map,
                  engine=None,
                  mapper=None,
-                 move_distance=2.0,
-                 yaw_amount=np.pi / 10.,
-                 pitch_amount=np.pi / 5.,
                  action_not_allowed_reward=-100.,
                  use_ros=True,
                  ros_pose_topic='agent_pose',
                  ros_world_frame='map'):
-        """Initialize environment.
+        """Initialize base environment.
 
         Args:
             bounding_box (BoundingBox): Overall bounding box of the scene.
+            action_map (list): Mapping from index to an action function.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            move_distance (float): Scale of local motions.
-            yaw_amount (float): Scale of yaw rotations.
-            pitch_amount (float): Scale of pitch rotations.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
             use_ros (bool): Whether to use ROS and publish on some topics.
             ros_pose_topic (str): If ROS is used publish agent poses on this topic.
@@ -61,22 +58,7 @@ class Environment(object):
             from mapping.octomap_ext_mapper import OctomapExtMapper
             mapper = OctomapExtMapper()
         self._mapper = mapper
-        self._action_map = [
-            # self.nop,
-            self.move_left,
-            self.move_right,
-            self.move_down,
-            self.move_up,
-            self.move_backward,
-            self.move_forward,
-            self.yaw_clockwise,
-            self.yaw_counter_clockwise,
-            self.pitch_up,
-            self.pitch_down,
-        ]
-        self._move_distance = move_distance
-        self._yaw_amount = yaw_amount
-        self._pitch_amount = pitch_amount
+        self._action_map = action_map
         self._action_not_allowed_reward = action_not_allowed_reward
         if use_ros:
             import rospy
@@ -86,7 +68,8 @@ class Environment(object):
             self._pose_pub = rospy.Publisher(ros_pose_topic, PoseStamped, queue_size=10)
         else:
             self._use_ros = False
-        self._is_running = True
+        self._initialized = False
+        self._is_running = False
 
     def _update_state(self, new_state):
         """Update state and publish the corresponding pose"""
@@ -135,11 +118,16 @@ class Environment(object):
 
     def start(self):
         """Start environment"""
+        assert(self._initialized)
         self._is_running = True
 
     def get_bounding_box(self):
         """Get overall bounding box"""
         return self._bounding_box
+
+    def get_action_not_allowed_reward(self):
+        """Return reward for invalid action"""
+        return self._action_not_allowed_reward
 
     def get_state(self):
         """Get current state with corresponding pose from simulation engine"""
@@ -192,6 +180,7 @@ class Environment(object):
         self._mapper.perform_clear_bounding_box_voxels(clear_bbox)
         # Only for debugging and visualization (RViz has problems showing free voxels)
         # self._mapper.perform_override_bounding_box_voxels(clear_bbox, 0.8)
+        self._initialized = True
 
     def simulate_action(self, state, action_index):
         """Simulate the effect of an action on a state"""
@@ -252,6 +241,62 @@ class Environment(object):
     # def nop(self, state):
     #     return self.State(state.location(), state.orientation_rpy())
 
+
+class Environment(BaseEnvironment):
+    """Environment adds local motions and rotations to BaseEnvironment."""
+
+    def __init__(self,
+                 bounding_box,
+                 engine=None,
+                 mapper=None,
+                 move_distance=2.0,
+                 yaw_amount=math_utils.degrees_to_radians(180. / 10.),
+                 pitch_amount=math_utils.degrees_to_radians(180. / 5.),
+                 action_not_allowed_reward=-100.,
+                 use_ros=True,
+                 ros_pose_topic='agent_pose',
+                 ros_world_frame='map'):
+        """Initialize environment.
+
+        Args:
+            bounding_box (BoundingBox): Overall bounding box of the scene.
+            engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
+            mapper: Occupancy mapper (i.e. OctomapExt interface).
+            move_distance (float): Scale of local motions.
+            yaw_amount (float): Scale of yaw rotations.
+            pitch_amount (float): Scale of pitch rotations.
+            action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
+            use_ros (bool): Whether to use ROS and publish on some topics.
+            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
+            ros_world_frame (str): If ROS is used this is the id of the world frame.
+        """
+
+        self._move_distance = move_distance
+        self._yaw_amount = yaw_amount
+        self._pitch_amount = pitch_amount
+        action_map = [
+            # self.nop,
+            self.move_left,
+            self.move_right,
+            self.move_down,
+            self.move_up,
+            self.move_backward,
+            self.move_forward,
+            self.yaw_clockwise,
+            self.yaw_counter_clockwise,
+            self.pitch_up,
+            self.pitch_down,
+        ]
+        super(Environment, self).__init__(
+            bounding_box,
+            action_map,
+            engine,
+            mapper,
+            action_not_allowed_reward,
+            use_ros,
+            ros_pose_topic,
+            ros_world_frame)
+
     def move_left(self, state):
         """Perform local move left"""
         return self._move_local_without_pr(state, np.array([0, +self._move_distance, 0]))
@@ -291,3 +336,92 @@ class Environment(object):
     def pitch_down(self, state):
         """Perform pitch rotation down"""
         return self._rotate(state, 0, +self._pitch_amount, 0)
+
+
+class SimpleEnvironment(BaseEnvironment):
+    """SimpleEnvironment adds simple orbital motion actions to BaseEnvironment."""
+
+    def __init__(self,
+                 bounding_box,
+                 engine=None,
+                 mapper=None,
+                 radius=15.0,
+                 height=5.0,
+                 angle_amount=math_utils.degrees_to_radians(180. / 10.),
+                 action_not_allowed_reward=-100.,
+                 use_ros=True,
+                 ros_pose_topic='agent_pose',
+                 ros_world_frame='map'):
+        """Initialize environment.
+
+        Args:
+            bounding_box (BoundingBox): Overall bounding box of the scene.
+            engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
+            mapper: Occupancy mapper (i.e. OctomapExt interface).
+            radius (float): Radius of orbit.
+            radius (float): Height of orbit.
+            angle_amount (float): Scale of orbital motion.
+            action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
+            use_ros (bool): Whether to use ROS and publish on some topics.
+            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
+            ros_world_frame (str): If ROS is used this is the id of the world frame.
+        """
+
+        self._radius = radius
+        self._height = height
+        self._angle_amount = angle_amount
+        action_map = [
+            self.orbit_clockwise,
+            self.orbit_counter_clockwise
+        ]
+        super(SimpleEnvironment, self).__init__(
+            bounding_box,
+            action_map,
+            engine,
+            mapper,
+            action_not_allowed_reward,
+            use_ros,
+            ros_pose_topic,
+            ros_world_frame)
+
+    def _get_orbit_angle(self, state):
+        theta = np.arctan2(state.location()[1], state.location()[0])
+        return theta
+
+    def _get_orbit_state(self, theta):
+        x = self._radius * np.cos(theta)
+        y = self._radius * np.sin(theta)
+        z = self._height
+        location = np.array([x, y, z])
+        roll = 0
+        pitch = 0
+        yaw = theta + np.pi
+        orientation_rpy = np.array([roll, pitch, yaw])
+        state = self.State(location, orientation_rpy)
+        return state
+
+    def orbit_clockwise(self, state):
+        """Perform clockwise orbit move"""
+        current_theta = self._get_orbit_angle(state)
+        new_theta = current_theta - self._angle_amount
+        new_state = self._get_orbit_state(new_theta)
+        return new_state
+
+    def orbit_counter_clockwise(self, state):
+        """Perform counter-clockwise orbit move"""
+        current_theta = self._get_orbit_angle(state)
+        new_theta = current_theta + self._angle_amount
+        new_state = self._get_orbit_state(new_theta)
+        return new_state
+
+    def initialize(self, clear_size=3, current_state=None):
+        """Initialize environment and start from an orbit state"""
+        if current_state is None:
+            current_state = self.get_state()
+        theta = self._get_orbit_angle(current_state)
+        current_state = self._get_orbit_state(theta)
+        self._update_state(current_state)
+        super(SimpleEnvironment, self).initialize(clear_size, current_state)
+
+    def is_action_allowed(self, state, action_index):
+        return True
