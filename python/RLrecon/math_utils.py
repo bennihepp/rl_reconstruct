@@ -2,6 +2,16 @@ import numpy as np
 from tf import transformations
 
 
+def degrees_to_radians(degrees):
+    """Convert angle in degrees to radians"""
+    return degrees * np.pi / 180.0
+
+
+def radians_to_degrees(radians):
+    """Convert angle in radians to degrees"""
+    return radians * 180.0 / np.pi
+
+
 class BoundingBox(object):
 
     def __init__(self, min, max):
@@ -66,3 +76,17 @@ def rotate_vector_with_quaternion(quat, vec):
         transformations.quaternion_conjugate(quat))
     rot_vec = rot_vec_q[:3]
     return rot_vec
+
+
+def is_vector_equal(vec1, vec2, tolerance=1e-10):
+    """Compare if two vectors are equal (L1-norm) according to a tolerance"""
+    return np.all(np.abs(vec1 - vec2) <= tolerance)
+
+
+def is_equal_quaternion(quat1, quat2, tolerance=1e-10):
+    """Compare if two quaternions are equal
+
+    This depends on L1-norm. A better way would be to use the angular difference
+    """
+    return is_vector_equal(quat1, quat2, tolerance) \
+        or is_vector_equal(quat1, -quat2, tolerance)
