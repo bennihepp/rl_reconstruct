@@ -113,11 +113,11 @@ def run(engine, point_cloud_topic, location_origin):
         # Update camera location
         new_location = np.copy(center_location)
         if look_inside:
-            new_location[0] += radius * np.cos(-yaw + np.pi)
-            new_location[1] += radius * np.sin(-yaw + np.pi)
+            new_location[0] += radius * np.cos(yaw + np.pi)
+            new_location[1] += radius * np.sin(yaw + np.pi)
         else:
-            new_location[0] += radius * np.cos(-yaw)
-            new_location[1] += radius * np.sin(-yaw)
+            new_location[0] += radius * np.cos(yaw)
+            new_location[1] += radius * np.sin(yaw)
         engine.set_location(new_location)
         rospy.logdebug("location: {} {} {}".format(*new_location))
         rospy.logdebug("rotation: {} {} {}".format(roll * 180 / np.pi, pitch * 180 / np.pi, yaw * 180 / np.pi))
@@ -179,13 +179,14 @@ def run(engine, point_cloud_topic, location_origin):
             point_cloud_service = rospy.ServiceProxy(point_cloud_topic, InsertPointCloud, persistent=True)
         else:
             rospy.loginfo("Integrating point cloud took {}s".format(response.elapsed_seconds))
+            rospy.loginfo("Received score: {}".format(response.score))
             rospy.loginfo("Received reward: {}".format(response.reward))
 
         rate.sleep()
 
 
 if __name__ == '__main__':
-    engine = UnrealCVWrapper()
+    engine = UnrealCVWrapper(image_scale_factor=1.0)
     point_cloud_topic = 'insert_point_cloud'
     location_origin = np.array([0, 0, 0])
     rospy.init_node('test_mapping', anonymous=False)

@@ -67,7 +67,7 @@ class UnrealCVWrapper(BaseEngine):
 
     """Return focal length of camera"""
     def get_focal_length(self):
-        # TODO: Should come from UnrealCV
+        # TODO: Focal length (and also projection matrix) should come from UnrealCV
         return 320. * self._image_scale_factor
 
     """Return the current RGB image"""

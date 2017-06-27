@@ -11,12 +11,47 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
 from octomap_server_ext.srv import RaycastCamera, RaycastCameraRequest
 from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+import math_utils
+import ros_utils
+
+
+def get_bbox_mask(point_cloud, bbox):
+    within_bounding_box_mask = np.logical_and(
+        np.logical_and(
+            np.logical_and(
+                point_cloud['x'] >= bbox.minimum()[0],
+                point_cloud['x'] <= bbox.maximum()[0]
+            ),
+            np.logical_and(
+                point_cloud['y'] >= bbox.minimum()[1],
+                point_cloud['y'] <= bbox.maximum()[1]
+            )
+        ),
+        np.logical_and(
+            point_cloud['z'] >= bbox.minimum()[2],
+            point_cloud['z'] <= bbox.maximum()[2]
+        )
+    )
+    return within_bounding_box_mask
+
+
+def get_uncertain_mask(point_cloud):
+    uncertain_voxel_mask = \
+        np.logical_or(
+            np.logical_not(point_cloud['is_known']),
+            np.logical_and(
+                point_cloud['occupancy'] >= 0.25,
+                point_cloud['occupancy'] <= 0.75
+            )
+        )
+    return uncertain_voxel_mask
 
 
 def run(engine, raycast_topic, location_origin):
     rospy.wait_for_service(raycast_topic)
     raycast_service = rospy.ServiceProxy(raycast_topic, RaycastCamera, persistent=True)
     raycast_pc_pub = rospy.Publisher("raycast_point_cloud", PointCloud2, queue_size=1)
+    uncertain_pc_pub = rospy.Publisher("uncertain_point_cloud", PointCloud2, queue_size=1)
 
     # Setup loop timer
     rate = rospy.Rate(10)
@@ -25,7 +60,7 @@ def run(engine, raycast_topic, location_origin):
     height = 240
     width = 320
     focal_length = 160
-    ignore_unknown_voxels = True
+    ignore_unknown_voxels = False
 
     while not rospy.is_shutdown():
         # Read new pose, camera info and depth image
@@ -76,17 +111,37 @@ def run(engine, raycast_topic, location_origin):
             rospy.loginfo("Number of hit unknown voxels: {}".format(response.num_hits_unknown))
             rospy.loginfo("Expected reward: {}".format(response.expected_reward))
             rospy.loginfo("Point cloud size: {}".format(response.point_cloud.width * response.point_cloud.height))
-            pc = response.point_cloud
-            pc.header.stamp = timestamp
-            pc.header.frame_id = 'map'
-            raycast_pc_pub.publish(pc)
+            bounding_box = math_utils.BoundingBox(
+                [-3, -3, 0],
+                [+3, +3, +6]
+            )
+            pc = ros_utils.point_cloud2_ros_to_numpy(response.point_cloud)
+            pc = np.unique(pc)
+            bbox_mask = get_bbox_mask(pc, bounding_box)
+            pc = pc[bbox_mask]
+            print(pc.shape)
+            uncertain_mask = get_uncertain_mask(pc)
+            pc = pc[uncertain_mask]
+            tentative_reward = len(pc)
+            rospy.loginfo("Tentative reward: {}".format(tentative_reward))
+            rospy.loginfo("")
+            raycast_pc_msg = response.point_cloud
+            raycast_pc_msg.header.stamp = timestamp
+            raycast_pc_msg.header.frame_id = 'map'
+            raycast_pc_pub.publish(raycast_pc_msg)
+            pc_xyz = ros_utils.structured_to_3d_array(pc)
+            print("pc_xyz.shape: ", pc_xyz.shape)
+            uncertain_pc_msg = ros_utils.point_cloud2_numpy_to_ros(pc_xyz)
+            uncertain_pc_msg.header.stamp = timestamp
+            uncertain_pc_msg.header.frame_id = 'map'
+            uncertain_pc_pub.publish(uncertain_pc_msg)
 
         rate.sleep()
 
 
 if __name__ == '__main__':
+    rospy.init_node('test_mapping', anonymous=False)
     engine = UnrealCVWrapper()
     raycast_topic = 'raycast_camera'
     location_origin = np.array([0, 0, 0])
-    rospy.init_node('test_mapping', anonymous=False)
     run(engine, raycast_topic, location_origin)
