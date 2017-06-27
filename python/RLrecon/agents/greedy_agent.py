@@ -58,7 +58,7 @@ class GreedyAgent(BaseAgent):
         width = self._environment._engine.get_width()
         height = self._environment._engine.get_height()
         focal_length = self._environment._engine.get_focal_length()
-        ignore_unknown_voxels = self._environment._ignore_unknown_voxels
+        ignore_unknown_voxels = False
         timer = utils.Timer()
         rr = self._environment._mapper.perform_raycast_camera_rpy(
             state.location(),

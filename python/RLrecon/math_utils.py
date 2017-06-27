@@ -21,20 +21,20 @@ class BoundingBox(object):
         return "({}, {})".format(self.minimum(), self.maximum())
 
 
-"""Convert xyz position from left- to right-handed coordinate system"""
 def convert_xyz_from_left_to_right_handed(location):
+    """Convert xyz position from left- to right-handed coordinate system"""
     location = np.array([location[0], -location[1], location[2]])
     return location
 
 
-"""Convert xyz position from right- to left-handed coordinate system"""
 def convert_xyz_from_right_to_left_handed(location):
+    """Convert xyz position from right- to left-handed coordinate system"""
     location = np.array([location[0], -location[1], location[2]])
     return location
 
 
-"""Convert roll, pitch, yaw euler angles from left- to right-handed coordinate system"""
 def convert_rpy_from_left_to_right_handed(orientation_rpy):
+    """Convert roll, pitch, yaw euler angles from left- to right-handed coordinate system"""
     roll, pitch, yaw = orientation_rpy
     # Convert left-handed Unreal system to right-handed system
     yaw = -yaw
@@ -42,8 +42,8 @@ def convert_rpy_from_left_to_right_handed(orientation_rpy):
     return np.array([roll, pitch, yaw])
 
 
-"""Convert roll, pitch, yaw euler angles from right- to left-handed coordinate system"""
 def convert_rpy_from_right_to_left_handed(orientation_rpy):
+    """Convert roll, pitch, yaw euler angles from right- to left-handed coordinate system"""
     roll, pitch, yaw = orientation_rpy
     # Convert left-handed Unreal system to right-handed system
     yaw = -yaw
@@ -51,15 +51,15 @@ def convert_rpy_from_right_to_left_handed(orientation_rpy):
     return np.array([roll, pitch, yaw])
 
 
-"""Convert roll, pitch, yaw euler angles to quaternion"""
 def convert_rpy_to_quat(orientation_rpy):
+    """Convert roll, pitch, yaw euler angles to quaternion"""
     roll, pitch, yaw = orientation_rpy
     quat = transformations.quaternion_from_euler(yaw, pitch, roll, 'rzyx')
     return quat
 
 
-"""Rotate a vector with a given quaternion"""
 def rotate_vector_with_quaternion(quat, vec):
+    """Rotate a vector with a given quaternion"""
     vec_q = [vec[0], vec[1], vec[2], 0]
     rot_vec_q = transformations.quaternion_multiply(
         transformations.quaternion_multiply(quat, vec_q),

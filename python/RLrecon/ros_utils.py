@@ -6,8 +6,8 @@ from geometry_msgs.msg import Point, Quaternion
 from sensor_msgs.msg import PointCloud2, PointField
 
 
-"""Convert ROS Point message to numpy array"""
 def point_ros_to_numpy(point_msg, point_np=None):
+    """Convert ROS Point message to numpy array"""
     if point_np is None:
         point_np = np.empty((3,))
     point_np[0] = point_msg.x
@@ -16,8 +16,8 @@ def point_ros_to_numpy(point_msg, point_np=None):
     return point_np
 
 
-"""Convert numpy array to ROS Point message"""
 def point_numpy_to_ros(point_np, point_msg=None):
+    """Convert numpy array to ROS Point message"""
     if point_msg is None:
         point_msg = Point()
     point_msg.x = point_np[0]
@@ -26,8 +26,8 @@ def point_numpy_to_ros(point_np, point_msg=None):
     return point_msg
 
 
-"""Convert ROS Quaternion message to numpy ([x, y, z, w])"""
 def quaternion_ros_to_numpy(quat_msg, quat_np=None):
+    """Convert ROS Quaternion message to numpy ([x, y, z, w])"""
     if quat_np is None:
         quat_np = np.empty((4,))
     quat_np[0] = quat_msg.x
@@ -37,8 +37,8 @@ def quaternion_ros_to_numpy(quat_msg, quat_np=None):
     return quat_np
 
 
-"""Convert numpy Quaternion ([x, y, z, w]) to ROS message"""
 def quaternion_numpy_to_ros(quat_np, quat_msg=None):
+    """Convert numpy Quaternion ([x, y, z, w]) to ROS message"""
     if quat_msg is None:
         quat_msg = Quaternion()
     quat_msg.x = quat_np[0]
@@ -88,8 +88,8 @@ def _point_cloud2_get_numpy_dtype(is_bigendian, fields):
     return dtype
 
 
-"""Convert ROS PointCloud2 message to structured numpy array"""
 def point_cloud2_ros_to_numpy(point_cloud_msg):
+    """Convert ROS PointCloud2 message to structured numpy array"""
     np_dtype = _point_cloud2_get_numpy_dtype(point_cloud_msg.is_bigendian, point_cloud_msg.fields)
     itemsize = np.dtype(np_dtype).itemsize
     skip_bytes = point_cloud_msg.point_step - itemsize
@@ -99,14 +99,14 @@ def point_cloud2_ros_to_numpy(point_cloud_msg):
     return pc
 
 
-"""Convert numpy structure array with x, y and z field to (n, 3) array"""
 def structured_to_3d_array(pc_arr):
+    """Convert numpy structure array with x, y and z field to (n, 3) array"""
     pc_xyz = np.stack([pc_arr['x'], pc_arr['y'], pc_arr['z']], axis=1)
     return pc_xyz
 
 
-"""Convert xyz numpy array to ROS PointCloud2 message"""
 def point_cloud2_numpy_to_ros(point_cloud, frame_id=None, timestamp=None):
+    """Convert xyz numpy array to ROS PointCloud2 message"""
     assert(isinstance(point_cloud, np.ndarray))
     point_cloud = np.asarray(point_cloud, np.float32)
     point_cloud_msg = PointCloud2()

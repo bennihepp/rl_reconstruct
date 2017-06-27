@@ -7,9 +7,9 @@ from RLrecon import math_utils
 
 class BaseEngine(object):
 
-    """Returns point cloud in camera frame. Assuming x-axis points forward, y-axis left and z-axis up."""
     @staticmethod
     def _create_points_from_depth_image(depth_image, focal_length):
+        """Returns point cloud in camera frame. Assuming x-axis points forward, y-axis left and z-axis up."""
         height = depth_image.shape[0]
         width = depth_image.shape[1]
         x_c = np.float(width) / 2 - 1

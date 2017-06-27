@@ -15,8 +15,8 @@ class BaseAgent(object):
         assert(temperature > 0)
         self._temperature = temperature
 
-    """Convert a list of values/rewards to a probability distribution with the currently set 'temperature'"""
     def _values_to_prob_distribution(self, values):
+        """Convert a list of values/rewards to a probability distribution with the currently set 'temperature'"""
         exp_values = np.exp(values / self._temperature)
         prob_dist = exp_values / np.sum(exp_values)
         return prob_dist
