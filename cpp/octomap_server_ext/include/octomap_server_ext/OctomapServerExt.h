@@ -30,6 +30,8 @@
 #ifndef OCTOMAP_SERVER_OCTOMAPSERVER_EXT_H
 #define OCTOMAP_SERVER_OCTOMAPSERVER_EXT_H
 
+#include <unordered_set>
+
 #include <ros/ros.h>
 #include <visualization_msgs/MarkerArray.h>
 #include <nav_msgs/OccupancyGrid.h>
@@ -59,9 +61,12 @@
 #include <message_filters/subscriber.h>
 #include <octomap_msgs/Octomap.h>
 #include <octomap_msgs/GetOctomap.h>
-#include <octomap_msgs/BoundingBoxQuery.h>
 #include <octomap_msgs/conversions.h>
+#include <octomap_server_ext/ClearBoundingBox.h>
+#include <octomap_server_ext/OverrideBoundingBox.h>
 #include <octomap_server_ext/InsertPointCloud.h>
+#include <octomap_server_ext/QueryVoxels.h>
+#include <octomap_server_ext/Raycast.h>
 #include <octomap_server_ext/RaycastCamera.h>
 
 #include <octomap_ros/conversions.h>
@@ -88,30 +93,72 @@ public:
   typedef octomap::OcTree OcTreeT;
 #endif
   typedef octomap_msgs::GetOctomap OctomapSrv;
-  typedef octomap_msgs::BoundingBoxQuery BBXSrv;
+
+  struct PointXYZExt {
+    union {
+      float xyz[3];
+      struct {
+        float x;
+        float y;
+        float z;
+      };
+    };
+    float occupancy;
+    bool is_surface;
+    bool is_known;
+#ifdef COLOR_OCTOMAP_SERVER
+    union {
+      uint_8 rgb[3];
+      struct {
+        uint_8 r;
+        uint_8 g;
+        uint_8 b;
+      }
+    };
+#endif
+  };
+  using PointCloudExt = pcl::PointCloud<PointXYZExt>;
+
+  struct Ray {
+      octomath::Vector3 origin;
+      octomath::Vector3 direction;
+  };
+
+  struct QueryVoxelsResult {
+      std::size_t num_occupied;
+      std::size_t num_free;
+      std::size_t num_unknown;
+      double expected_reward;
+      pcl::PointCloud<PointXYZExt> point_cloud;
+  };
 
   struct RaycastResult {
       std::size_t num_hits_occupied;
+      std::size_t num_hits_free;
       std::size_t num_hits_unknown;
       double expected_reward;
-      PCLPointCloud point_cloud;
+      pcl::PointCloud<PointXYZExt> point_cloud;
   };
 
   OctomapServerExt(ros::NodeHandle private_nh_ = ros::NodeHandle("~"));
   virtual ~OctomapServerExt();
   virtual bool octomapBinarySrv(OctomapSrv::Request  &req, OctomapSrv::GetOctomap::Response &res);
   virtual bool octomapFullSrv(OctomapSrv::Request  &req, OctomapSrv::GetOctomap::Response &res);
-  bool clearBBXSrv(BBXSrv::Request& req, BBXSrv::Response& resp);
   bool resetSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
 
   void filterHeightPointCloud(PCLPointCloud& cloud);
+  virtual bool clearBoundingBoxSrv(ClearBoundingBox::Request& req, ClearBoundingBox::Response& resp);
+  virtual bool overrideBoundingBoxSrv(OverrideBoundingBox::Request &req, OverrideBoundingBox::Response &res);
   virtual void insertCloudCallback(const sensor_msgs::PointCloud2::ConstPtr& cloud);
   virtual bool insertPointCloudSrv(InsertPointCloud::Request &req, InsertPointCloud::Response &res);
+  virtual bool queryVoxelsSrv(QueryVoxels::Request &req, QueryVoxels::Response &res);
+  virtual bool raycastSrv(Raycast::Request &req, Raycast::Response &res);
   virtual bool raycastCameraSrv(RaycastCamera::Request &req, RaycastCamera::Response &res);
+  void pointCloudExtToROSMsg(const PointCloudExt& pcl_cloud, sensor_msgs::PointCloud2& ros_cloud);
   virtual bool openFile(const std::string& filename);
 
   void readSurfaceVoxels(const std::string& filename);
-  double computeReward() const;
+  double computeScore() const;
 
 protected:
   inline static void updateMinKey(const octomap::OcTreeKey& in, octomap::OcTreeKey& min) {
@@ -141,6 +188,36 @@ protected:
   virtual void publishAll(const ros::Time& rostime = ros::Time::now());
 
   /**
+  * @brief override occupancy of a bounding box volume
+  *
+  * @param min Minimum of bounding box
+  * @param max Maximum of bounding box
+  * @param occupancy Occupancy value to override
+  * @param densify Whether to create new nodes in unknown space
+  */
+  virtual void overrideBoundingBox(const octomath::Vector3& min, const octomath::Vector3& max,
+                                   const double occupancy, const bool densify);
+
+  /**
+  * @brief perform a query of voxels on the occupancy map
+  *
+  * @param voxels The voxels to query
+  * @return Results of the query
+  */
+  virtual QueryVoxelsResult queryVoxels(const std::vector<octomath::Vector3>& voxels);
+
+  /**
+  * @brief perform raycast of rays
+  *
+  * @param rays The rays to cast
+  * @param ignore_unknown_voxels Whether to ignore unknown voxels when casting the ray
+  * @return Results of the raycast including Point cloud of hit occupied voxels
+  */
+  virtual RaycastResult raycast(const std::vector<Ray>& rays,
+                                const bool ignore_unknown_voxels = false,
+                                const float max_range = -1);
+
+  /**
   * @brief perform raycast for pinhole camera
   * The returned point cloud is in global map frame.
   *
@@ -148,11 +225,13 @@ protected:
   * @param height Height of camera image plane
   * @param width Height of camera image plane
   * @param focal_length Focal length of pinhole camera
-  * @return Point cloud of hit occupied voxels
+  * @return Results of the raycast including Point cloud of hit occupied voxels
   */
   virtual RaycastResult raycastCamera(const tf::Transform& sensor_to_world_tf,
                                       const int height, const int width,
-                                      const float focal_length, const bool ignore_unknown_voxels = false);
+                                      const float focal_length,
+                                      const bool ignore_unknown_voxels = false,
+                                      const float max_range = -1);
 
   /**
   * @brief update occupancy map with a scan
@@ -240,9 +319,13 @@ protected:
   ros::Publisher  m_markerPub, m_binaryMapPub, m_fullMapPub, m_pointCloudPub, m_collisionObjectPub, m_mapPub, m_cmapPub, m_fmapPub, m_fmarkerPub;
   message_filters::Subscriber<sensor_msgs::PointCloud2>* m_pointCloudSub;
   tf::MessageFilter<sensor_msgs::PointCloud2>* m_tfPointCloudSub;
+  ros::ServiceServer m_clearBoundingBoxService;
+  ros::ServiceServer m_overrideBoundingBoxService;
   ros::ServiceServer m_insertPointCloudService;
+  ros::ServiceServer m_queryVoxelsService;
+  ros::ServiceServer m_raycastService;
   ros::ServiceServer m_raycastCameraService;
-  ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_clearBBXService, m_resetService;
+  ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_resetService;
   tf::TransformListener m_tfListener;
   boost::recursive_mutex m_config_mutex;
   dynamic_reconfigure::Server<OctomapServerExtConfig> m_reconfigureServer;
@@ -300,13 +383,13 @@ protected:
 
   std::string m_surfaceVoxelsFilename;
   std::vector<octomath::Vector3> m_surfaceVoxels;
-  std::vector<octomap::OcTreeKey> m_surfaceVoxelKeys;
+  std::unordered_set<octomap::OcTreeKey, octomap::OcTreeKey::KeyHash> m_surfaceVoxelKeys;
   float m_voxelFreeThreshold;
   float m_voxelOccupiedThreshold;
-  double m_rewardPerFreeVoxel;
-  double m_rewardPerOccupiedVoxel;
-  bool m_useSurfaceVoxelsForReward;
-  double m_reward;
+  double m_scorePerVoxel;
+  double m_scorePerSurfaceVoxel;
+  bool m_useOnlySurfaceVoxelsForScore;
+  double m_score;
 };
 }
 

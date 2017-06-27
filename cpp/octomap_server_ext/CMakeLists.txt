@@ -64,10 +64,20 @@ include_directories(${LIBBH_INCLUDE_DIR})
 set(LIBBH_LIBRARIES "${LIBBH_ROOT}/libbh.so")
 
 ## Declare ROS messages and services
+add_message_files(
+  FILES
+  Ray.msg
+)
+
+## Declare ROS messages and services
 add_service_files(
   FILES
   InsertPointCloud.srv
+  Raycast.srv
   RaycastCamera.srv
+  QueryVoxels.srv
+  ClearBoundingBox.srv
+  OverrideBoundingBox.srv
 )
 
 ## Generate added messages and services

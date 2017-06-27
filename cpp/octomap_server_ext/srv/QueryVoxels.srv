@@ -1,0 +1,8 @@
+geometry_msgs/Point[] voxels
+---
+float32 elapsed_seconds
+int32 num_occupied
+int32 num_free
+int32 num_unknown
+float32 expected_reward
+sensor_msgs/PointCloud2 point_cloud
