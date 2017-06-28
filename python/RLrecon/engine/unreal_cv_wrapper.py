@@ -182,7 +182,8 @@ class UnrealCVWrapper(BaseEngine):
         location_unreal = math_utils.convert_xyz_from_right_to_left_handed(location)
         # Convert meters to Unreal (cm)
         location_unreal *= 100
-        request_str = 'vset /camera/0/location {} {} {}'.format(
+        # UnrealCV cannot handle scientific notation so we use :f format specifier
+        request_str = 'vset /camera/0/location {:f} {:f} {:f}'.format(
             location_unreal[0], location_unreal[1], location_unreal[2])
         # print("Sending location request: {}".format(request_str))
         self._cv_client.request(request_str)
@@ -190,7 +191,8 @@ class UnrealCVWrapper(BaseEngine):
     def set_orientation_rpy(self, roll, pitch, yaw):
         """Set new orientation in radians"""
         roll, pitch, yaw = math_utils.convert_rpy_from_right_to_left_handed([roll, pitch, yaw])
-        request_str = 'vset /camera/0/rotation {} {} {}'.format(
+        # UnrealCV cannot handle scientific notation so we use :f format specifier
+        request_str = 'vset /camera/0/rotation {:f} {:f} {:f}'.format(
             pitch * 180 / np.pi, yaw * 180 / np.pi, roll * 180 / np.pi)
         # print("Sending orientation request: {}".format(request_str))
         self._cv_client.request(request_str)

@@ -32,7 +32,9 @@ class BaseEngine(object):
         roll, pitch, yaw = orientation_rpy
         self.set_orientation_rpy(roll, pitch, yaw)
         focal_length = self.get_focal_length()
-        # Make sure that the new frame is rendered. This should be fixed in the UnrealCV plugin.
+        # TODO: Seems to be unnecessary now.
+        # Make sure that the new frame is rendered.
+        # This should be fixed in the UnrealCV plugin.
         quat = math_utils.convert_rpy_to_quat(orientation_rpy)
         max_delay_time = 2.0
         t0 = time.time()
@@ -40,7 +42,10 @@ class BaseEngine(object):
             if math_utils.is_vector_equal(location, self.get_location(), tolerance=1e-4) \
                     and math_utils.is_equal_quaternion(quat, self.get_orientation_quat(), tolerance=1e-4):
                 break
-            time.sleep(0.02)
+            time.sleep(0.01)
+        # TODO: Seems to be unnecessary now.
+        # After the pose was successfully updated, wait a little bit longer.
+        # time.sleep(0.1)
         # t1 = time.time()
         # print("delay={}".format(t1 - t0))
         depth_image = self.get_depth_image()
