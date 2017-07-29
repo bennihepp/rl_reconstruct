@@ -20,79 +20,6 @@ from tensorflow.python.client import timeline
 from RLrecon.utils import Timer
 
 
-def create_epoch_batch_generator(filenames, batch_size,
-                                 num_parallel_files=4,
-                                 shuffle_filenames=True, shuffle_records=True,
-                                 verbose=False):
-    if num_parallel_files > len(filenames):
-        num_parallel_files = len(filenames)
-    # Make a copy so we don't change the input list
-    filenames = list(filenames)
-    if shuffle_filenames:
-        np.random.shuffle(filenames)
-    transfer_rate_report_interval = 10
-    batch_count = 0
-    t0 = time.time()
-    for file_idx in xrange(0, len(filenames), num_parallel_files):
-        current_filenames = filenames[file_idx:file_idx + num_parallel_files]
-        for k in xrange(len(current_filenames)):
-            records = data_record.read_hdf5_records_v2(current_filenames[k])
-            if k == 0:
-                merged_grid_3ds = records.grid_3ds
-                merged_rewards = records.rewards
-                merged_prob_rewards = records.prob_rewards
-                merged_scores = records.scores
-            else:
-                merged_grid_3ds = np.concatenate([merged_grid_3ds, records.grid_3ds])
-                merged_rewards = np.concatenate([merged_rewards, records.rewards])
-                merged_prob_rewards = np.concatenate([merged_prob_rewards, records.prob_rewards])
-                merged_scores = np.concatenate([merged_scores, records.scores])
-        records = data_record.RecordBatch(
-            records.obs_levels, merged_grid_3ds, merged_rewards, merged_prob_rewards, merged_scores)
-        indices = np.arange(records.rewards.shape[0])
-        if shuffle_records:
-            np.random.shuffle(indices)
-        for batch_idx in xrange(0, len(indices), batch_size):
-            batch_grid_3ds = records.grid_3ds[batch_idx:batch_idx + batch_size, ...]
-            batch_rewards = records.rewards[batch_idx:batch_idx + batch_size, ...]
-            batch_prob_rewards = records.prob_rewards[batch_idx:batch_idx + batch_size, ...]
-            batch_scores = records.scores[batch_idx:batch_idx + batch_size, ...]
-            if batch_idx + batch_size > records.rewards.shape[0]:
-                # Incomplete batch, repeat data
-                while batch_rewards.shape[0] < batch_size:
-                    # print("Padding batch to get desired batch size")
-                    batch_rewards = np.concatenate([batch_rewards, batch_rewards])
-                    batch_prob_rewards = np.concatenate([batch_prob_rewards, batch_prob_rewards])
-                    batch_scores = np.concatenate([batch_scores, batch_scores])
-                    batch_grid_3ds = np.concatenate([batch_grid_3ds, batch_grid_3ds])
-                batch_rewards = batch_rewards[:batch_size, ...]
-                batch_prob_rewards = batch_prob_rewards[:batch_size, ...]
-                batch_scores = batch_scores[:batch_size, ...]
-                batch_grid_3ds = batch_grid_3ds[:batch_size, ...]
-            assert(batch_rewards.shape[0] == batch_size)
-            assert(batch_prob_rewards.shape[0] == batch_size)
-            assert(batch_scores.shape[0] == batch_size)
-            assert(batch_grid_3ds.shape[0] == batch_size)
-            if verbose:
-                print("Queue filler batch_count:", batch_count)
-            yield data_record.RecordBatch(records.obs_levels, batch_grid_3ds,
-                                          batch_rewards, batch_prob_rewards,
-                                          batch_scores)
-            batch_count += 1
-            if verbose:
-                if batch_count % transfer_rate_report_interval == 0:
-                    print("merged_grid_3ds.shape:", merged_grid_3ds.shape)
-                    batch_bytes = 4 * len(batch_grid_3ds.flatten()) + 4 * len(batch_rewards.flatten()) \
-                                 + 4 * len(batch_prob_rewards.flatten()) + 4 * len(batch_scores.flatten())
-                    batch_per_sec = float(batch_count) / (time.time() - t0)
-                    mb_per_sec = float(batch_bytes * batch_count) / (time.time() - t0) / 1024. / 1024.
-                    print("Memory per batch: {} kB".format(batch_bytes / 1024.))
-                    print("Read {} batches".format(batch_count))
-                    print("Reading rate: {} batch/s, {} MB/s".format(batch_per_sec, mb_per_sec))
-                    t0 = time.time()
-                    batch_count = 0
-
-
 def run(args):
     # Learning parameters
     num_epochs = args.num_epochs
@@ -120,8 +47,11 @@ def run(args):
     else:
         train_filename_generator = file_helpers.input_filename_generator_hdf5(args.data_path)
         train_filenames = list(train_filename_generator)
-        test_filename_generator = file_helpers.input_filename_generator_hdf5(args.test_data_path)
-        test_filenames = list(test_filename_generator)
+        if args.data_path == args.test_data_path:
+            test_filenames = list(train_filenames)
+        else:
+            test_filename_generator = file_helpers.input_filename_generator_hdf5(args.test_data_path)
+            test_filenames = list(test_filename_generator)
         all_filenames = train_filenames + test_filenames
 
     if len(train_filenames) == 0:
@@ -150,11 +80,11 @@ def run(args):
     subvolume_slice_x = slice(0, 16)
     subvolume_slice_y = slice(0, 16)
     subvolume_slice_z = slice(0, 16)
-    tmp_record_batch = data_record.read_hdf5_records_v2(train_filenames[0])
-    print("obs_levels in data record: {}".format(tmp_record_batch.obs_levels))
-    raw_grid_3d_batch = tmp_record_batch.grid_3ds
+    tmp_records = data_record.read_hdf5_records_v2_as_list(train_filenames[0])
+    print("obs_levels in data record: {}".format(tmp_records[0].obs_levels))
+    raw_grid_3d = tmp_records[0].grid_3d
     if args.obs_levels_to_use is None:
-        grid_3d_channels = range(raw_grid_3d_batch.shape[-1])
+        grid_3d_channels = range(raw_grid_3d.shape[-1])
     else:
         obs_levels_to_use = [int(x) for x in args.obs_levels_to_use.split(',')]
         grid_3d_channels = []
@@ -163,15 +93,15 @@ def run(args):
             grid_3d_channels.append(2 * level + 1)
 
     if args.subvolume_slice_x is None:
-        subvolume_slice_x = slice(0, raw_grid_3d_batch.shape[1])
+        subvolume_slice_x = slice(0, raw_grid_3d.shape[0])
     else:
         subvolume_slice_x = slice(*[int(x) for x in args.subvolume_slice_x.split(',')])
     if args.subvolume_slice_y is None:
-        subvolume_slice_y = slice(0, raw_grid_3d_batch.shape[2])
+        subvolume_slice_y = slice(0, raw_grid_3d.shape[1])
     else:
         subvolume_slice_y = slice(*[int(x) for x in args.subvolume_slice_y.split(',')])
     if args.subvolume_slice_z is None:
-        subvolume_slice_z = slice(0, raw_grid_3d_batch.shape[3])
+        subvolume_slice_z = slice(0, raw_grid_3d.shape[2])
     else:
         subvolume_slice_z = slice(*[int(x) for x in args.subvolume_slice_z.split(',')])
 
@@ -187,143 +117,47 @@ def run(args):
     def get_input_from_record(record):
         return record.grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, grid_3d_channels]
 
-    def get_input_from_grid_3ds(grid_3ds):
-        return grid_3ds[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, grid_3d_channels]
-
-    def get_input_batch(record_batch):
-        # merged_grid_3ds = merged_grid_3ds[..., grid_3d_channels]
-        # merged_grid_3ds = merged_grid_3ds[:, subvolume_slices[0], subvolume_slices[1], subvolume_slices[2], :]
-        return record_batch.grid_3ds[:, subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, grid_3d_channels]
-
-    # TODO
-    # def get_input_from_record(record_tuple):
-    #     obs_levels, grid_3ds, rewards, prob_rewards, norm_rewards, norm_prob_rewards, scores = record_tuple
-    #     print(subvolume_slice_x)
-    #     print(grid_3d_channels)
-    #     # single_input = grid_3ds[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, grid_3d_channels]
-    #     print(grid_3ds.shape)
-    #     single_input = grid_3ds[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, ...]
-    #     single_input = tf.transpose(single_input)
-    #     single_input = tf.gather(single_input, tf.constant(grid_3d_channels))
-    #     single_input = tf.transpose(single_input)
-    #     print(single_input.shape)
-    #     single_input.set_shape((16, 16, 16, len(grid_3d_channels)))
-    #     return single_input
-
-    # TODO
-    # def get_target_from_record(record_tuple):
-    #     obs_levels, grid_3ds, rewards, prob_rewards, norm_rewards, norm_prob_rewards, scores = record_tuple
-    #     if args.target_id == "rewards":
-    #         return rewards
-    #     elif args.target_id == "norm_rewards":
-    #         return norm_rewards
-    #     elif args.target_id == "prob_rewards":
-    #         return prob_rewards
-    #     elif args.target_id == "norm_prob_rewards":
-    #         return norm_prob_rewards
-    #     elif args.target_id == "score":
-    #         return scores[0:1]
-    #     elif args.target_id == "norm_score":
-    #         return scores[1:2]
-    #     elif args.target_id == "prob_score":
-    #         return scores[2:3]
-    #     elif args.target_id == "norm_prob_score":
-    #         return scores[3:4]
-    #     elif args.target_id == "mean_occupancy":
-    #         flat_batch = grid_3ds[..., 0::2].reshape((grid_3ds.shape[0], -1))
-    #         mean_occupancy = tf.reduce_mean(flat_batch)
-    #         return mean_occupancy
-    #     elif args.target_id == "sum_occupancy":
-    #         flat_batch = grid_3ds[..., 0::2].reshape((grid_3ds.shape[0], -1))
-    #         sum_occupancy = tf.reduce_sum(flat_batch)
-    #         return sum_occupancy
-    #     elif args.target_id == "mean_observation":
-    #         gather_idx = tf.concat([tf.range(0, tf.shape(grid_3ds)[0]),
-    #                              tf.range(0, tf.shape(grid_3ds)[1]),
-    #                              tf.range(0, tf.shape(grid_3ds)[2]),
-    #                              tf.range(1, 2, 2)], axis=0)
-    #         values = tf.gather_nd(grid_3ds, gather_idx)
-    #         mean_observation = tf.reduce_sum(values)
-    #         return mean_observation
-    #     elif args.target_id == "sum_observation":
-    #         flat_batch = grid_3ds[..., 1::2].reshape((grid_3ds.shape[0], -1))
-    #         sum_observation = tf.reduce_sum(flat_batch)
-    #         return sum_observation
-
     if args.target_id == "rewards":
         def get_target_from_record(record):
             return record.rewards
-        # TODO: Remove these
-        def get_target_batch(record_batch):
-            return record_batch.rewards
     elif args.target_id == "norm_rewards":
         def get_target_from_record(record):
             return record.norm_rewards
-        def get_target_batch(record_batch):
-            return record_batch.norm_rewards
     elif args.target_id == "prob_rewards":
         def get_target_from_record(record):
             return record.prob_rewards
-        def get_target_batch(record_batch):
-            return record_batch.prob_rewards
     elif args.target_id == "norm_prob_rewards":
         def get_target_from_record(record):
             return record.norm_prob_rewards
-        def get_target_batch(record_batch):
-            return record_batch.norm_prob_rewards
     elif args.target_id == "score":
         def get_target_from_record(record):
             return record.scores[0:1]
-        def get_target_batch(record_batch):
-            return record_batch.scores[:, 0:1]
     elif args.target_id == "norm_score":
         def get_target_from_record(record):
             return record.scores[1:2]
-        def get_target_batch(record_batch):
-            return record_batch.scores[:, 1:2]
     elif args.target_id == "prob_score":
         def get_target_from_record(record):
             return record.scores[2:3]
-        def get_target_batch(record_batch):
-            return record_batch.scores[:, 2:3]
     elif args.target_id == "norm_prob_score":
         def get_target_from_record(record):
             return record.scores[3:4]
-        def get_target_batch(record_batch):
-            return record_batch.scores[:, 3:4]
     elif args.target_id == "mean_occupancy":
         def get_target_from_record(record):
             return np.mean(record.grid_3d[..., 0::2]).reshape((1,))
-        def get_target_batch(record_batch):
-            flat_batch = record_batch.grid_3ds[..., 0::2].reshape((record_batch.grid_3ds.shape[0], -1))
-            mean_occupancy = flat_batch.mean(axis=-1)
-            return mean_occupancy[:, np.newaxis]
     elif args.target_id == "sum_occupancy":
         def get_target_from_record(record):
             return np.sum(record.grid_3d[..., 0::2]).reshape((1,))
-        def get_target_batch(record_batch):
-            flat_batch = record_batch.grid_3ds[..., 0::2].reshape((record_batch.grid_3ds.shape[0], -1))
-            sum_occupancy = flat_batch.sum(axis=-1)
-            return sum_occupancy[:, np.newaxis]
     elif args.target_id == "mean_observation":
         def get_target_from_record(record):
             return np.mean(record.grid_3d[..., 1::2]).reshape((1,))
-        def get_target_batch(record_batch):
-            flat_batch = record_batch.grid_3ds[..., 1::2].reshape((record_batch.grid_3ds.shape[0], -1))
-            mean_observation = flat_batch.mean(axis=-1)
-            return mean_observation[:, np.newaxis]
     elif args.target_id == "sum_observation":
         def get_target_from_record(record):
             return np.sum(record.grid_3d[..., 1::2]).reshape((1,))
-        def get_target_batch(record_batch):
-            flat_batch = record_batch.grid_3ds[..., 1::2].reshape((record_batch.grid_3ds.shape[0], -1))
-            sum_observation = flat_batch.sum(axis=-1)
-            return sum_observation[:, np.newaxis]
 
-    grid_3d_batch = tmp_record_batch.grid_3ds
-    grid_3d_shape = list(grid_3d_batch.shape[1:])
-    input_shape = list(get_input_batch(tmp_record_batch).shape[1:])
-    target_shape = list(get_target_batch(tmp_record_batch).shape[1:])
+    grid_3d = tmp_records[0].grid_3d
+    grid_3d_shape = list(grid_3d.shape)
+    input_shape = list(get_input_from_record(tmp_records[0]).shape)
+    target_shape = list(get_target_from_record(tmp_records[0]).shape)
     print("grid_3d_shape: {}".format(grid_3d_shape))
     print("input_shape: {}".format(input_shape))
     print("target_shape: {}".format(target_shape))
@@ -406,35 +240,6 @@ def run(args):
     epoch_tf = tf.Variable(tf.constant(0, dtype=tf.int64), trainable=False, name='epoch')
     inc_epoch = epoch_tf.assign_add(tf.constant(1, dtype=tf.int64))
 
-    def wrap_generator(generator):
-        for record_batch in generator:
-            yield get_input_batch(record_batch), get_target_batch(record_batch)
-
-    def train_epoch_generator_factory():
-        generator = create_epoch_batch_generator(train_filenames, batch_size, verbose=args.verbose)
-        return wrap_generator(generator)
-
-    def test_epoch_generator_factory():
-        generator = create_epoch_batch_generator(test_filenames, batch_size,
-                                                 shuffle_filenames=False, shuffle_records=False,
-                                                 verbose=args.verbose)
-        return wrap_generator(generator)
-
-    # TODO
-    # def read_records_from_files(filenames, num_threads, shuffle=True, num_epochs=-1, verbose=False):
-    #     if num_epochs <= 0:
-    #         num_epochs = None
-    #     num_files = len(filenames)
-    #     filename_queue = tf.train.string_input_producer(filenames, shuffle=shuffle, num_epochs=num_epochs)
-    #     record_tuple = data_record.read_and_decode_tfrecords(filename_queue)
-    #     return record_tuple
-
-    # TODO
-    # def preprocess_record(record_tuple):
-    #     single_input = get_input_from_record(record_tuple)
-    #     single_target = get_target_from_record(record_tuple)
-    #     return single_input, single_target, tf.constant(0, dtype=tf.int64)
-
     def make_batches(tensors,
                      shapes,
                      batch_size,
@@ -471,21 +276,20 @@ def run(args):
     sess = tf.Session(config=config)
     coord = tf.train.Coordinator()
 
-    def preprocess_record(record, epoch):
+    def preprocess_record(record):
         single_input = get_input_from_record(record)
         single_input = (single_input - mean_input_np) / stddev_input_np
         single_target = get_target_from_record(record)
-        return single_input, single_target, epoch
+        return single_input, single_target
 
     with tf.device("/cpu:0"):
-        filename_queue_provider = tf_utils.FilenameQueueProvider(filenames, coord, shuffle=True, verbose=args.verbose)
         epoch_shape = []
         train_data_bridge = data_provider.TFDataBridge(
             sess, batch_size,
             [input_shape, target_shape, epoch_shape],
             [tf.float32, tf.float32, tf.int64],
             queue_capacity=args.cpu_train_queue_capacity,
-            min_after_dequeue=2000,
+            min_after_dequeue=args.cpu_train_queue_min_after_dequeue,
             shuffle=True,
             name="train_data_queue")
         test_data_bridge = data_provider.TFDataBridge(
@@ -493,27 +297,32 @@ def run(args):
             [input_shape, target_shape, epoch_shape],
             [tf.float32, tf.float32, tf.int64],
             queue_capacity=args.cpu_test_queue_capacity,
-            min_after_dequeue=0,
+            min_after_dequeue=args.cpu_test_queue_min_after_dequeue,
             shuffle=False,
             name="test_data_queue")
 
         def enqueue_record_with_epoch_factory(data_bridge):
             def enqueue_record_with_epoch(record, epoch):
                 single_input, single_target = preprocess_record(record)
-                epoch_tf = tf.constant(0, tf.int64)
-                data_bridge.enqueue([single_input, single_target, epoch_tf])
+                return data_bridge.enqueue([single_input, single_target, epoch])
             return enqueue_record_with_epoch
 
-        train_hdf5_reader = data_record.HDF5QueueReader(
-            filename_queue_provider.get_next,
-            enqueue_record_with_epoch_factory(train_data_bridge),
-            coord,
-            verbose=args.verbose)
-        test_hdf5_reader = data_record.HDF5QueueReader(
-            filename_queue_provider.get_next,
-            enqueue_record_with_epoch_factory(test_data_bridge),
-            coord,
-            verbose=args.verbose)
+        train_filename_queue_provider = tf_utils.FilenameQueueProvider(
+            train_filenames, coord, shuffle=True, verbose=args.verbose)
+        test_filename_queue_provider = tf_utils.FilenameQueueProvider(
+            test_filenames, coord, shuffle=False, verbose=args.verbose)
+        train_hdf5_readers = [
+            data_record.HDF5QueueReader(
+                train_filename_queue_provider.get_next,
+                enqueue_record_with_epoch_factory(train_data_bridge),
+                coord,
+                verbose=args.verbose) for _ in range(args.cpu_train_queue_threads)]
+        test_hdf5_readers = [
+            data_record.HDF5QueueReader(
+                test_filename_queue_provider.get_next,
+                enqueue_record_with_epoch_factory(test_data_bridge),
+                coord,
+                verbose=args.verbose) for _ in range(args.cpu_test_queue_threads)]
         train_tensors = train_data_bridge.deque()
         test_tensors = test_data_bridge.deque()
         train_input_batch, train_target_batch, train_epoch_batch = make_batches(
@@ -552,7 +361,7 @@ def run(args):
         # input_batch = tf.placeholder(tf.float32, shape=[None] + list(input_shape), name="in_input")
         with tf.variable_scope("model"):
             with tf.variable_scope("conv3d"):
-                conv3d_layer = models.Conv3DLayers(input_batch,
+                conv3d_layer = models.Conv3DLayers(train_input_batch,
                                                    num_convs_per_block=args.num_convs_per_block,
                                                    initial_num_filters=args.initial_num_filters,
                                                    filter_increase_per_block=args.filter_increase_per_block,
@@ -572,9 +381,9 @@ def run(args):
             variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, tf.get_variable_scope().name)
 
         # Generate ground-truth inputs for computing loss function
-        # target_batch = tf.placeholder(dtype=np.float32, shape=[None], name="target_batch")
+        # train_target_batch = tf.placeholder(dtype=np.float32, shape=[None], name="target_batch")
 
-        loss_batch = tf.reduce_mean(tf.square(output_layer.output - target_batch), axis=-1, name="loss_batch")
+        loss_batch = tf.reduce_mean(tf.square(output_layer.output - train_target_batch), axis=-1, name="loss_batch")
         loss = tf.reduce_mean(loss_batch, name="loss")
         loss_min = tf.reduce_min(loss_batch, name="loss_min")
         loss_max = tf.reduce_max(loss_batch, name="loss_max")
@@ -648,20 +457,22 @@ def run(args):
     # Model histogram summaries
     # with tf.name_scope('model'):
     with tf.device("/cpu:0"):
-        target_summary = tf.summary.histogram("target_batch", target_batch),
+        target_summary = tf.summary.histogram("target_batch", train_target_batch),
         model_summaries = [target_summary] + conv3d_layer.summaries + output_layer.summaries
         model_summary_op = tf.summary.merge(model_summaries)
 
     saver = tf.train.Saver(max_to_keep=args.keep_n_last_checkpoints,
                            keep_checkpoint_every_n_hours=args.keep_checkpoint_every_n_hours)
 
-    # qr = tf.train.QueueRunner(queue, [enqueue_op] * 4)
-    filename_queue_provider.start()
-    hdf5_reader.start()
-    custom_threads = [
-        filename_queue_provider.thread,
-        hdf5_reader.thread
-    ]
+    train_filename_queue_provider.start()
+    test_filename_queue_provider.start()
+    custom_threads = [train_filename_queue_provider.thread, test_filename_queue_provider.thread]
+    for hdf5_reader in train_hdf5_readers:
+        hdf5_reader.start()
+        custom_threads.append(hdf5_reader.thread)
+    for hdf5_reader in test_hdf5_readers:
+        hdf5_reader.start()
+        custom_threads.append(hdf5_reader.thread)
 
     # Print all variables
     print("Tensorflow variables:")
@@ -708,10 +519,6 @@ def run(args):
         else:
             train_options = None
 
-        mean_input, stddev_input = sess.run([mean_input_tf, stddev_input_tf])
-        print("mean_input_tf:", np.mean(mean_input.flatten()))
-        print("stddev_input_tf:", np.mean(stddev_input.flatten()))
-
         print("Preloading GPU")
 
         # Get preload ops and make sure the GPU pipeline is filled with a mini-batch
@@ -733,13 +540,15 @@ def run(args):
             total_loss_min = +np.finfo(np.float32).max
             total_loss_max = -np.finfo(np.float32).max
             batch_count = 0
-            # assert(epoch == train_data_provider.get_epoch())
-            assert(epoch == int(sess.run([train_max_epoch_batch])[0]))
+            # TODO: This only works if epochs are big enough. Find better way to handle this counting.
+            # assert(epoch == int(sess.run([train_max_epoch_batch])[0]))
             do_summary = epoch > 0 and epoch % train_summary_interval == 0
             if do_summary:
                 var_global_norm_v = 0.0
                 grad_global_norm_v = 0.0
             do_model_summary = epoch % model_summary_interval == 0
+            # do_summary = False
+            # do_model_summary = False
             # while True:
             epoch_done = False
             while not epoch_done:
@@ -822,11 +631,12 @@ def run(args):
                 # while True:
                 epoch_done = False
                 while not epoch_done:
-                    _, loss_v, loss_min_v, loss_max_v = sess.run([test_gpu_preload_op, test_loss, test_loss_min, test_loss_max])
+                    _, max_data_epoch, loss_v, loss_min_v, loss_max_v = sess.run([
+                        test_gpu_preload_op, test_max_epoch_batch, test_loss, test_loss_min, test_loss_max])
                     total_loss_value += loss_v
                     total_loss_min = np.minimum(loss_min_v, total_loss_min)
                     total_loss_max = np.maximum(loss_max_v, total_loss_max)
-                    epoch_done = test_max_epoch_batch > epoch
+                    epoch_done = max_data_epoch > epoch
                     batch_count += 1
                 total_loss_value /= batch_count
                 print("------------")
@@ -852,11 +662,12 @@ def run(args):
 
         saver.save(sess, os.path.join(args.store_path, "model"), global_step=global_step_tf)
 
-    except Exception, exc:
-        print("Exception in training loop: {}".format(exc))
-        coord.request_stop(exc)
-    except KeyboardInterrupt:
-        print("Keyboard interrupt in training loop")
+    # except Exception, exc:
+    #     print("Exception in training loop: {}".format(exc))
+    #     coord.request_stop(exc)
+    #     raise exc
+    # except KeyboardInterrupt:
+    #     print("Keyboard interrupt in training loop")
     finally:
         print("Requesting stop")
         coord.request_stop()
@@ -895,6 +706,10 @@ if __name__ == '__main__':
     parser.add_argument('--gpu_memory_fraction', type=float, default=0.5)
     parser.add_argument('--cpu_train_queue_capacity', type=int, default=1024 * 128)
     parser.add_argument('--cpu_test_queue_capacity', type=int, default=1024 * 128)
+    parser.add_argument('--cpu_train_queue_min_after_dequeue', type=int, default=2000)
+    parser.add_argument('--cpu_test_queue_min_after_dequeue', type=int, default=0)
+    parser.add_argument('--cpu_train_queue_threads', type=int, default=4)
+    parser.add_argument('--cpu_test_queue_threads', type=int, default=1)
 
     # Learning parameters
     parser.add_argument('--num_epochs', type=int, default=10000)

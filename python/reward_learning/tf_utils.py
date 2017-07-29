@@ -1,10 +1,13 @@
+from __future__ import print_function
+
 import threading
 import Queue
+import numpy as np
 import tensorflow as tf
 
 
 class FilenameQueueProvider(object):
-    def __init__(self, filenames, coord, shuffle, timeout=2, verbose=False):
+    def __init__(self, filenames, coord, shuffle, timeout=60, verbose=False):
         self._coord = coord
         self._shuffle = shuffle
         self._timeout = timeout
@@ -21,15 +24,20 @@ class FilenameQueueProvider(object):
                 np.random.shuffle(self._filenames)
             for filename in self._filenames:
                 entry = (filename, self._epoch)
-                try:
-                    self._filename_queue.put(entry, block=True, timeout=self._timeout)
-                except Queue.Full:
-                    pass
+                enqueued = False
+                while not enqueued:
+                    try:
+                        self._filename_queue.put(entry, block=True, timeout=self._timeout)
+                        enqueued = True
+                    except Queue.Full:
+                        pass
+                    if self._coord.should_stop():
+                        break
                 if self._coord.should_stop():
                     break
             self._epoch += 1
         if self._verbose:
-            print("Stop request... exiting filename queue thread")
+            print("Stop request... Exiting filename queue thread")
 
     def start(self):
         assert (self._thread is None)

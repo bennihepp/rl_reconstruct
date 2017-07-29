@@ -1,3 +1,5 @@
+from __future__ import print_function
+
 from collections import namedtuple
 import threading
 import numpy as np
@@ -190,12 +192,18 @@ class HDF5QueueReader(object):
             filename, epoch = entry
             record_batch = read_hdf5_records_v2(filename)
             for record in generate_single_records_from_batch_v2(record_batch):
-                self._enqueue_record_fn(record, epoch)
+                enqueued = False
+                while not enqueued:
+                    enqueued = self._enqueue_record_fn(record, epoch)
+                    if self._coord.should_stop():
+                        break
+                if self._coord.should_stop():
+                    break
                 record_count += 1
             if self._verbose:
                 print("Enqueued {} records. Current epoch is {}".format(record_count, epoch))
         if self._verbose:
-            print("Stop request... exiting HDF5 queue reader thread")
+            print("Stop request... Exiting HDF5 queue reader thread")
 
     def start(self):
         assert (self._thread is None)

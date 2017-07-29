@@ -1,4 +1,5 @@
 from __future__ import print_function
+
 import threading
 import Queue
 import tensorflow as tf
@@ -151,7 +152,7 @@ class TFDataBridge(object):
                  shuffle=True,
                  name="<default>",
                  verbose=False,
-                 timeout=2):
+                 timeout=60):
         self._sess = sess
         self._batch_size = batch_size
         self._queue_capacity = queue_capacity
@@ -194,15 +195,25 @@ class TFDataBridge(object):
 
     def enqueue(self, tensors):
         assert(len(tensors) == len(self._tensors))
-        self._sess.run([self._enqueue_op], feed_dict={
-            self._tensors[i]: tensors[i] for i in xrange(len(self._tensors))})
+        try:
+            self._sess.run([self._enqueue_op],
+                           feed_dict={
+                               self._tensors[i]: tensors[i] for i in xrange(len(self._tensors))},
+                           options=self._enqueue_options)
+            return True
+        except tf.errors.DeadlineExceededError:
+            return False
 
     def enqueue_batch(self, tensors):
         for tensor in tensors:
             assert(tensor.shape[0] == self._batch_size)
-        self._sess.run(self._enqueue_batch_op,
-                       feed_dict={self._tensors: tensors},
-                       options=self._enqueue_options)
+        try:
+            self._sess.run(self._enqueue_batch_op,
+                           feed_dict={self._tensors: tensors},
+                           options=self._enqueue_options)
+            return True
+        except tf.errors.DeadlineExceededError:
+            return False
 
     def deque(self):
         return self._dequeue_op
