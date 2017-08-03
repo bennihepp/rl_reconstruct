@@ -14,6 +14,7 @@ import numpy as np
 import tensorflow as tf
 import tensorflow.contrib.staging as tf_staging
 import tensorflow.contrib.layers as tf_layers
+import tensorflow.contrib.memory_stats as tf_memory_stats
 import tf_utils
 import data_provider
 from tensorflow.python.client import timeline
@@ -21,6 +22,12 @@ from RLrecon.utils import Timer
 
 
 def run(args):
+    retry_save_wait_time = 3
+    max_num_summary_errors = 3
+    model_summary_num_batches = args.model_summary_num_batches
+    if model_summary_num_batches <= 0:
+        model_summary_num_batches = np.iinfo(np.int32).max
+
     # Learning parameters
     num_epochs = args.num_epochs
     batch_size = args.batch_size
@@ -30,8 +37,10 @@ def run(args):
     model_summary_interval = args.model_summary_interval
     checkpoint_interval = args.checkpoint_interval
 
+    # Only for debugging of the train operation
     create_tf_timeline = False
 
+    # Determine train/test dataset filenames and optionally split them
     split_data = args.test_data_path is None
     if split_data:
         train_test_split_ratio = args.train_test_split_ratio
@@ -75,23 +84,15 @@ def run(args):
     else:
         print("Using all test dataset files")
 
-    # Input configuration
-    grid_3d_channels = [0, 1]
-    subvolume_slice_x = slice(0, 16)
-    subvolume_slice_y = slice(0, 16)
-    subvolume_slice_z = slice(0, 16)
-    tmp_records = data_record.read_hdf5_records_v2_as_list(train_filenames[0])
-    print("obs_levels in data record: {}".format(tmp_records[0].obs_levels))
-    raw_grid_3d = tmp_records[0].grid_3d
-    if args.obs_levels_to_use is None:
-        grid_3d_channels = range(raw_grid_3d.shape[-1])
-    else:
-        obs_levels_to_use = [int(x) for x in args.obs_levels_to_use.split(',')]
-        grid_3d_channels = []
-        for level in obs_levels_to_use:
-            grid_3d_channels.append(2 * level)
-            grid_3d_channels.append(2 * level + 1)
-
+    # Input configuration, i.e. which slices and channels from the 3D grids to use.
+    # First read any of the data records
+    tmp_record_batch = data_record.read_hdf5_records_v2(train_filenames[0])
+    assert(tmp_record_batch.grid_3ds.shape[0] > 0)
+    tmp_records = list(data_record.generate_single_records_from_batch_v2(tmp_record_batch))
+    tmp_record = tmp_records[0]
+    print("obs_levels in data record: {}".format(tmp_record.obs_levels))
+    raw_grid_3d = tmp_record.grid_3d
+    # Determine subvolume slices
     if args.subvolume_slice_x is None:
         subvolume_slice_x = slice(0, raw_grid_3d.shape[0])
     else:
@@ -104,15 +105,23 @@ def run(args):
         subvolume_slice_z = slice(0, raw_grid_3d.shape[2])
     else:
         subvolume_slice_z = slice(*[int(x) for x in args.subvolume_slice_z.split(',')])
-
-    print("grid_3d_channels: {}".format(grid_3d_channels))
+    # Determine channels to use
+    if args.obs_levels_to_use is None:
+        grid_3d_channels = range(raw_grid_3d.shape[-1])
+    else:
+        obs_levels_to_use = [int(x) for x in args.obs_levels_to_use.split(',')]
+        grid_3d_channels = []
+        for level in obs_levels_to_use:
+            grid_3d_channels.append(2 * level)
+            grid_3d_channels.append(2 * level + 1)
+    # Print used subvolume slices and channels
     print("subvolume_slice_x: {}".format(subvolume_slice_x))
     print("subvolume_slice_y: {}".format(subvolume_slice_y))
     print("subvolume_slice_z: {}".format(subvolume_slice_z))
-    # subvolume_slice_x_indices = range(raw_grid_3d_batch.shape[1])[subvolume_slice_x]
-    # subvolume_slice_y_indices = range(raw_grid_3d_batch.shape[2])[subvolume_slice_y]
-    # subvolume_slice_z_indices = range(raw_grid_3d_batch.shape[3])[subvolume_slice_z]
-    subvolume_slices = [subvolume_slice_x, subvolume_slice_y, subvolume_slice_z]
+    print("grid_3d_channels: {}".format(grid_3d_channels))
+    print("target_id: {}".format(args.target_id))
+
+    # Retrieval functions for input and target from data records
 
     def get_input_from_record(record):
         return record.grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, grid_3d_channels]
@@ -153,11 +162,36 @@ def run(args):
     elif args.target_id == "sum_observation":
         def get_target_from_record(record):
             return np.sum(record.grid_3d[..., 1::2]).reshape((1,))
+    else:
+        raise NotImplementedError("Unknown target name: {}".format(args.target_id))
 
-    grid_3d = tmp_records[0].grid_3d
+    # Report some stats on input and outputs for the first data file
+    # This is only for sanity checking
+    for channel in grid_3d_channels:
+        print("mean channel {}: {}".format(channel, np.mean(tmp_record_batch.grid_3ds[..., channel])))
+        print("stddev channel {}: {}".format(channel, np.std(tmp_record_batch.grid_3ds[..., channel])))
+        print("min channel {}: {}".format(channel, np.min(tmp_record_batch.grid_3ds[..., channel])))
+        print("max channel {}: {}".format(channel, np.max(tmp_record_batch.grid_3ds[..., channel])))
+    tmp_inputs = [get_input_from_record(record) for record in tmp_records]
+    for i in xrange(tmp_inputs[0].shape[-1]):
+        values = [input[..., i] for input in tmp_inputs]
+        print("mean for input {}: {}".format(i, np.mean(values)))
+        print("stddev for input {}: {}".format(i, np.std(values)))
+        print("min for input {}: {}".format(i, np.min(values)))
+        print("max for input {}: {}".format(i, np.max(values)))
+    tmp_targets = [get_target_from_record(record) for record in tmp_records]
+    for i in xrange(tmp_targets[0].shape[-1]):
+        values = [target[..., i] for target in tmp_targets]
+        print("mean for target {}: {}".format(i, np.mean(values)))
+        print("stddev for target {}: {}".format(i, np.std(values)))
+        print("min for target {}: {}".format(i, np.min(values)))
+        print("max for target {}: {}".format(i, np.max(values)))
+
+    # Retrieve input and target shapes
+    grid_3d = tmp_record.grid_3d
     grid_3d_shape = list(grid_3d.shape)
-    input_shape = list(get_input_from_record(tmp_records[0]).shape)
-    target_shape = list(get_target_from_record(tmp_records[0]).shape)
+    input_shape = list(get_input_from_record(tmp_record).shape)
+    target_shape = list(get_target_from_record(tmp_record).shape)
     print("grid_3d_shape: {}".format(grid_3d_shape))
     print("input_shape: {}".format(input_shape))
     print("target_shape: {}".format(target_shape))
@@ -240,32 +274,6 @@ def run(args):
     epoch_tf = tf.Variable(tf.constant(0, dtype=tf.int64), trainable=False, name='epoch')
     inc_epoch = epoch_tf.assign_add(tf.constant(1, dtype=tf.int64))
 
-    def make_batches(tensors,
-                     shapes,
-                     batch_size,
-                     num_threads, queue_capacity, min_after_dequeue=2000,
-                     shuffle=True, verbose=False):
-        if shuffle:
-            batch_fn = tf.train.shuffle_batch
-        else:
-            batch_fn = tf.train.batch
-        batch_tensors = batch_fn(tensors,
-                                 batch_size,
-                                 queue_capacity,
-                                 min_after_dequeue,
-                                 num_threads,
-                                 shapes=shapes)
-        return batch_tensors
-
-    def gpu_preload_pipeline(input_batch, target_batch, gpu_device_name="/gpu:0"):
-        with tf.device(gpu_device_name):
-            gpu_staging_area = tf_staging.StagingArea(
-                dtypes=[input_batch.dtype, target_batch.dtype],
-                shapes=[input_batch.shape, target_batch.shape])
-        gpu_preload_op = gpu_staging_area.put([input_batch, target_batch])
-        gpu_input_batch, gpu_target_batch = gpu_staging_area.get()
-        return gpu_preload_op, gpu_input_batch, gpu_target_batch
-
     # Configure tensorflow
     config = tf.ConfigProto()
     config.gpu_options.per_process_gpu_memory_fraction = args.gpu_memory_fraction
@@ -276,82 +284,111 @@ def run(args):
     sess = tf.Session(config=config)
     coord = tf.train.Coordinator()
 
-    def preprocess_record(record):
-        single_input = get_input_from_record(record)
-        single_input = (single_input - mean_input_np) / stddev_input_np
-        single_target = get_target_from_record(record)
-        return single_input, single_target
+    class InputPipeline(object):
+
+        def _dequeue_record_factory(self, hdf5_input_pipeline):
+            def dequeue_record():
+                record = hdf5_input_pipeline.get_next_record()
+                return record
+
+            return dequeue_record
+
+        def _preprocess_record(self, record):
+            single_input = get_input_from_record(record)
+            single_input = (single_input - mean_input_np) / stddev_input_np
+            single_target = get_target_from_record(record)
+            # single_input = np.ones(single_input.shape)
+            # single_target = -np.ones(single_target.shape)
+            return single_input, single_target
+
+        def _enqueue_record_with(self, data_bridge):
+            def enqueue_record(record):
+                single_input, single_target = self._preprocess_record(record)
+                return data_bridge.enqueue([single_input, single_target])
+
+            return enqueue_record
+
+        def _gpu_preload_pipeline(self, input_batch, target_batch, gpu_device_name="/gpu:0"):
+            with tf.device(gpu_device_name):
+                gpu_staging_area = tf_staging.StagingArea(
+                    dtypes=[input_batch.dtype, target_batch.dtype],
+                    shapes=[input_batch.shape, target_batch.shape])
+            gpu_preload_op = gpu_staging_area.put([input_batch, target_batch])
+            gpu_input_batch, gpu_target_batch = gpu_staging_area.get()
+            return gpu_preload_op, gpu_input_batch, gpu_target_batch
+
+        def __init__(self, filenames, queue_capacity, min_after_dequeue, shuffle, num_threads, name):
+            with tf.device("/cpu:0"):
+                # Create HDF5 readers
+                self._hdf5_input_pipeline = data_record.HDF5ReaderProcessCoordinator(
+                    filenames, coord, shuffle=shuffle, timeout=args.async_timeout,
+                    num_processes=num_threads, verbose=args.verbose)
+                self._num_records = None
+
+                # Create python-TF data bridge
+                assert(queue_capacity > min_after_dequeue)
+                self._data_bridge = data_provider.TFDataBridge(
+                    sess, batch_size,
+                    [input_shape, target_shape],
+                    [tf.float32, tf.float32],
+                    queue_capacity=queue_capacity,
+                    min_after_dequeue=min_after_dequeue,
+                    shuffle=shuffle,
+                    timeout=args.async_timeout,
+                    name="{}_data_queue".format(name),
+                    verbose=args.verbose)
+
+                self._queue_bridges = [tf_utils.QueueBridge(
+                    self._dequeue_record_factory(self._hdf5_input_pipeline),
+                    self._enqueue_record_with(self._data_bridge),
+                    coord, args.verbose) for _ in xrange(num_threads)]
+
+                # Retrieve tensors from data bridge
+                self._tensors = self._data_bridge.deque_batch()
+                self._input_batch, self._target_batch = self._tensors
+                # Generate GPU preload operations
+                self._gpu_preload_op, self._input_batch, self._target_batch = \
+                    self._gpu_preload_pipeline(self._input_batch, self._target_batch)
+
+        def start(self):
+            self._hdf5_input_pipeline.start()
+            for bridge in self._queue_bridges:
+                bridge.start()
+
+        @property
+        def num_records(self):
+            if self._num_records is None:
+                self._num_records = self._hdf5_input_pipeline.compute_num_records()
+            return self._num_records
+
+        @property
+        def gpu_preload_op(self):
+            return self._gpu_preload_op
+
+        @property
+        def input_batch(self):
+            return self._input_batch
+
+        @property
+        def target_batch(self):
+            return self._target_batch
+
+        @property
+        def threads(self):
+            return [bridge.thread for bridge in self._queue_bridges] \
+                   + [self._hdf5_input_pipeline.thread]
 
     with tf.device("/cpu:0"):
-        epoch_shape = []
-        train_data_bridge = data_provider.TFDataBridge(
-            sess, batch_size,
-            [input_shape, target_shape, epoch_shape],
-            [tf.float32, tf.float32, tf.int64],
-            queue_capacity=args.cpu_train_queue_capacity,
-            min_after_dequeue=args.cpu_train_queue_min_after_dequeue,
-            shuffle=True,
-            name="train_data_queue")
-        test_data_bridge = data_provider.TFDataBridge(
-            sess, batch_size,
-            [input_shape, target_shape, epoch_shape],
-            [tf.float32, tf.float32, tf.int64],
-            queue_capacity=args.cpu_test_queue_capacity,
-            min_after_dequeue=args.cpu_test_queue_min_after_dequeue,
-            shuffle=False,
-            name="test_data_queue")
-
-        def enqueue_record_with_epoch_factory(data_bridge):
-            def enqueue_record_with_epoch(record, epoch):
-                single_input, single_target = preprocess_record(record)
-                return data_bridge.enqueue([single_input, single_target, epoch])
-            return enqueue_record_with_epoch
-
-        train_filename_queue_provider = tf_utils.FilenameQueueProvider(
-            train_filenames, coord, shuffle=True, verbose=args.verbose)
-        test_filename_queue_provider = tf_utils.FilenameQueueProvider(
-            test_filenames, coord, shuffle=False, verbose=args.verbose)
-        train_hdf5_readers = [
-            data_record.HDF5QueueReader(
-                train_filename_queue_provider.get_next,
-                enqueue_record_with_epoch_factory(train_data_bridge),
-                coord,
-                verbose=args.verbose) for _ in range(args.cpu_train_queue_threads)]
-        test_hdf5_readers = [
-            data_record.HDF5QueueReader(
-                test_filename_queue_provider.get_next,
-                enqueue_record_with_epoch_factory(test_data_bridge),
-                coord,
-                verbose=args.verbose) for _ in range(args.cpu_test_queue_threads)]
-        train_tensors = train_data_bridge.deque()
-        test_tensors = test_data_bridge.deque()
-        train_input_batch, train_target_batch, train_epoch_batch = make_batches(
-            train_tensors,
-            [input_shape, target_shape, epoch_shape],
-            batch_size,
-            num_threads=2,
-            queue_capacity=args.cpu_train_queue_capacity,
-            verbose=args.verbose)
-        test_input_batch, test_target_batch, test_epoch_batch = make_batches(
-            test_tensors,
-            [input_shape, target_shape, epoch_shape],
-            batch_size,
-            num_threads=2,
-            queue_capacity=args.cpu_test_queue_capacity,
-            verbose=args.verbose)
-        train_max_epoch_batch = tf.reduce_max(train_epoch_batch)
-        test_max_epoch_batch = tf.reduce_max(test_epoch_batch)
-        train_gpu_preload_op, train_input_batch, train_target_batch = \
-            gpu_preload_pipeline(train_input_batch, train_target_batch)
-        test_gpu_preload_op, test_input_batch, test_target_batch = \
-            gpu_preload_pipeline(test_input_batch, test_target_batch)
+        train_input_pipeline = InputPipeline(
+            train_filenames, args.cpu_train_queue_capacity, args.cpu_train_queue_min_after_dequeue,
+            shuffle=True, num_threads=args.cpu_train_queue_threads, name="train")
+        test_input_pipeline = InputPipeline(
+            test_filenames, args.cpu_test_queue_capacity, args.cpu_test_queue_min_after_dequeue,
+            shuffle=True, num_threads=args.cpu_test_queue_threads, name="test")
+        print("# records in train dataset: {}".format(train_input_pipeline.num_records))
+        print("# records in test dataset: {}".format(test_input_pipeline.num_records))
 
     # Create model
-
-    # Parameters
-    activation_fn_3dconv = tf_utils.get_activation_function_by_name(args.activation_fn_3dconv, tf.nn.relu)
-    num_units_regression = [int(x) for x in args.num_units_regression.split(',')]
-    activation_fn_regression = tf_utils.get_activation_function_by_name(args.activation_fn_regression, tf.nn.relu)
 
     if args.gpu_id < 0:
         device_name = '/cpu:0'
@@ -360,56 +397,29 @@ def run(args):
     with tf.device(device_name):
         # input_batch = tf.placeholder(tf.float32, shape=[None] + list(input_shape), name="in_input")
         with tf.variable_scope("model"):
-            with tf.variable_scope("conv3d"):
-                conv3d_layer = models.Conv3DLayers(train_input_batch,
-                                                   num_convs_per_block=args.num_convs_per_block,
-                                                   initial_num_filters=args.initial_num_filters,
-                                                   filter_increase_per_block=args.filter_increase_per_block,
-                                                   filter_increase_within_block=args.filter_increase_within_block,
-                                                   maxpool_after_each_block=args.maxpool_after_each_block,
-                                                   max_num_blocks=args.max_num_blocks,
-                                                   max_output_grid_size=args.max_output_grid_size,
-                                                   add_biases=args.add_biases_3dconv,
-                                                   activation_fn=activation_fn_3dconv,
-                                                   dropout_rate=args.dropout_rate)
-            num_outputs = target_shape[-1]
-            with tf.variable_scope("regression"):
-                output_layer = models.RegressionOutputLayer(conv3d_layer.output,
-                                                            num_outputs,
-                                                            num_units=num_units_regression,
-                                                            activation_fn=activation_fn_regression)
-            variables = tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, tf.get_variable_scope().name)
+            model_config = args
+            train_model = models.Model(model_config, train_input_pipeline.input_batch,
+                                       target_shape=target_shape, is_training=True)
+            variables = train_model.variables
 
         # Generate ground-truth inputs for computing loss function
         # train_target_batch = tf.placeholder(dtype=np.float32, shape=[None], name="target_batch")
 
-        loss_batch = tf.reduce_mean(tf.square(output_layer.output - train_target_batch), axis=-1, name="loss_batch")
+        loss_batch = tf.reduce_mean(
+            tf.square(train_model.output - train_input_pipeline.target_batch),
+            axis=-1, name="loss_batch")
         loss = tf.reduce_mean(loss_batch, name="loss")
         loss_min = tf.reduce_min(loss_batch, name="loss_min")
         loss_max = tf.reduce_max(loss_batch, name="loss_max")
 
         # Generate output and loss function for testing (no dropout)
         with tf.variable_scope("model", reuse=True):
-            with tf.variable_scope("conv3d"):
-                test_conv3d_layer = models.Conv3DLayers(test_input_batch,
-                                                        num_convs_per_block=args.num_convs_per_block,
-                                                        initial_num_filters=args.initial_num_filters,
-                                                        filter_increase_per_block=args.filter_increase_per_block,
-                                                        filter_increase_within_block=args.filter_increase_within_block,
-                                                        maxpool_after_each_block=args.maxpool_after_each_block,
-                                                        max_num_blocks=args.max_num_blocks,
-                                                        max_output_grid_size=args.max_output_grid_size,
-                                                        add_biases=args.add_biases_3dconv,
-                                                        activation_fn=activation_fn_3dconv,
-                                                        dropout_rate=0.0)
-            num_outputs = target_shape[-1]
-            with tf.variable_scope("regression"):
-                test_output_layer = models.RegressionOutputLayer(test_conv3d_layer.output_wo_dropout,
-                                                                 num_outputs,
-                                                                 num_units=num_units_regression,
-                                                                 activation_fn=activation_fn_regression)
-        test_loss_batch = tf.reduce_mean(tf.square(test_output_layer.output - test_target_batch),
-                                         axis=-1, name="loss_batch")
+            model_config = args
+            test_model = models.Model(model_config, test_input_pipeline.input_batch,
+                                      target_shape=target_shape, is_training=False)
+        test_loss_batch = tf.reduce_mean(
+            tf.square(test_model.output - test_input_pipeline.target_batch),
+            axis=-1, name="loss_batch")
         test_loss = tf.reduce_mean(test_loss_batch, name="test_loss")
         test_loss_min = tf.reduce_min(test_loss_batch, name="test_loss_min")
         test_loss_max = tf.reduce_max(test_loss_batch, name="test_loss_max")
@@ -425,9 +435,10 @@ def run(args):
                                                       args.learning_rate_decay_staircase)
         opt = optimizer_class(learning_rate_tf)
         gradients_and_variables = list(zip(gradients, variables))
-        train_op = opt.apply_gradients(gradients_and_variables)
-        # train_op = opt.minimize(loss, var_list=variables)
-        train_op = tf.group(train_op, inc_global_step)
+        var_to_grad_dict = {var: grad for grad, var in gradients_and_variables}
+        update_ops = tf.get_collection(tf.GraphKeys.UPDATE_OPS)
+        with tf.control_dependencies(update_ops):
+            train_op = opt.apply_gradients(gradients_and_variables, global_step=global_step_tf)
 
     # Tensorboard summaries
     summary_loss = tf.placeholder(tf.float32, [])
@@ -454,47 +465,82 @@ def run(args):
             tf.summary.scalar("loss_min", summary_loss_min),
             tf.summary.scalar("loss_max", summary_loss_max),
         ])
+
+    class ModelHistogramSummary(object):
+
+        def __init__(self, name_tensor_dict):
+            self.fetches = []
+            self.placeholders = []
+            summaries = []
+            for name, tensor in name_tensor_dict.iteritems():
+                var_batch_shape = [None] + tensor.shape[1:].as_list()
+                placeholder = tf.placeholder(tensor.dtype, var_batch_shape)
+                summaries.append(tf.summary.histogram(name, placeholder))
+                self.fetches.append(tensor)
+                self.placeholders.append(placeholder)
+            self.summary_op = tf.summary.merge(summaries)
+
+    if args.verbose:
+        print("Tensorflow variables:")
+        for var in tf.global_variables():
+            print("  {}: {}".format(var.name, var.shape))
+    print("Model variables:")
+    for grad, var in gradients_and_variables:
+        print("  {}: {}".format(var.name, var.shape))
+
     # Model histogram summaries
-    # with tf.name_scope('model'):
-    with tf.device("/cpu:0"):
-        target_summary = tf.summary.histogram("target_batch", train_target_batch),
-        model_summaries = [target_summary] + conv3d_layer.summaries + output_layer.summaries
-        model_summary_op = tf.summary.merge(model_summaries)
+    if model_summary_interval > 0:
+        with tf.device("/cpu:0"):
+            def get_model_hist_summary(input_pipeline, model):
+                model_summary_dict = {"target_batch": input_pipeline.target_batch}
+                for i, channel in enumerate(grid_3d_channels):
+                    model_summary_dict.update({"input_batch/[{}]".format(channel):
+                                                   input_pipeline.input_batch[..., slice(i, i+1)]})
+                model_summary_dict.update({"input_batch/mean": input_pipeline.input_batch})
+                for name, tensor in model.summaries.iteritems():
+                    model_summary_dict["model/" + name] = tensor
+                    # Reuse existing gradient expressions
+                    if tensor in var_to_grad_dict:
+                        grad = var_to_grad_dict[tensor]
+                        if grad is not None:
+                            model_summary_dict["model/" + name + "_grad"] = grad
+                model_hist_summary = ModelHistogramSummary(model_summary_dict)
+                return model_hist_summary
+            train_model_hist_summary = get_model_hist_summary(train_input_pipeline, train_model)
 
     saver = tf.train.Saver(max_to_keep=args.keep_n_last_checkpoints,
                            keep_checkpoint_every_n_hours=args.keep_checkpoint_every_n_hours)
 
-    train_filename_queue_provider.start()
-    test_filename_queue_provider.start()
-    custom_threads = [train_filename_queue_provider.thread, test_filename_queue_provider.thread]
-    for hdf5_reader in train_hdf5_readers:
-        hdf5_reader.start()
-        custom_threads.append(hdf5_reader.thread)
-    for hdf5_reader in test_hdf5_readers:
-        hdf5_reader.start()
-        custom_threads.append(hdf5_reader.thread)
-
-    # Print all variables
-    print("Tensorflow variables:")
-    for var in tf.global_variables():
-        print("  {}: {}".format(var.name, var.shape))
-
-    # Initialize tensorflow session
-    if create_tf_timeline:
-        run_metadata = tf.RunMetadata()
-    else:
-        run_metadata = None
-    init = tf.global_variables_initializer()
-    sess.run(init)
-
-    # enqueue_threads = qr.create_threads(sess, coord=coord, start=True)
-    enqueue_threads = []
-
     try:
+        train_input_pipeline.start()
+        test_input_pipeline.start()
+        custom_threads = train_input_pipeline.threads + test_input_pipeline.threads
+
+        # Print model size etc.
+        model_size = 0
+        model_grad_size = 0
+        for grad, var in gradients_and_variables:
+            model_size += np.sum(tf_utils.variable_size(var))
+            if grad is not None:
+                model_grad_size += np.sum(tf_utils.variable_size(grad))
+        model_conv3d_size = np.sum([tf_utils.variable_size(var) for var in train_model.modules["conv3d"].variables])
+        model_regression_size = np.sum([tf_utils.variable_size(var) for var in train_model.modules["regression"].variables])
+        print("Model variables: {} ({} MB)".format(model_size, model_size / 1024. / 1024.))
+        print("Model gradients: {} ({} MB)".format(model_grad_size, model_grad_size / 1024. / 1024.))
+        print("Model conv3d variables: {} ({} MB)".format(model_conv3d_size, model_conv3d_size / 1024. / 1024.))
+        print("Model regression variables: {} ({} MB)".format(model_regression_size, model_regression_size / 1024. / 1024.))
+
+        # Initialize tensorflow session
+        if create_tf_timeline:
+            run_metadata = tf.RunMetadata()
+        else:
+            run_metadata = None
+        init = tf.global_variables_initializer()
+        sess.run(init)
+
         # Start data provider threads
-        tf.train.start_queue_runners(sess=sess)
-        # train_data_provider.start_thread(sess)
-        # test_data_provider.start_thread(sess)
+        # enqueue_threads = qr.create_threads(sess, coord=coord, start=True)
+        custom_threads.extend(tf.train.start_queue_runners(sess=sess))
 
         # Tensorboard summary writer
         log_path = args.log_path if args.log_path is not None else args.store_path
@@ -511,7 +557,6 @@ def run(args):
                 print('Found previous checkpoint... restoring')
                 saver.restore(sess, ckpt.model_checkpoint_path)
 
-        timer = Timer()
         # Create timelines for profiling?
         if create_tf_timeline:
             train_options = tf.RunOptions(timeout_in_ms=100000,
@@ -519,77 +564,106 @@ def run(args):
         else:
             train_options = None
 
-        print("Preloading GPU")
-
         # Get preload ops and make sure the GPU pipeline is filled with a mini-batch
-        train_op = tf.group(train_op, train_gpu_preload_op)
-        sess.run([train_gpu_preload_op, test_gpu_preload_op])
+        train_op = tf.group(train_op, train_input_pipeline.gpu_preload_op)
+
+        with tf.device(tf_utils.gpu_device_name()):
+            max_memory_gpu = tf_memory_stats.BytesLimit()
+            peak_use_memory_gpu = tf_memory_stats.MaxBytesInUse()
 
         sess.graph.finalize()
 
+        print("Preloading GPU")
+        sess.run([train_input_pipeline.gpu_preload_op, test_input_pipeline.gpu_preload_op])
+
         print("Starting training")
 
+        timer = Timer()
         initial_epoch = int(sess.run([epoch_tf])[0])
+        num_summary_errors = 0
+        total_batch_count = 0
+        total_record_count = 0
+        # Training loop for all epochs
         for epoch in xrange(initial_epoch, num_epochs):
             if coord.should_stop():
                 break
 
-            compute_time = 0.0
-            data_time = 0.0
             total_loss_value = 0.0
             total_loss_min = +np.finfo(np.float32).max
             total_loss_max = -np.finfo(np.float32).max
             batch_count = 0
-            # TODO: This only works if epochs are big enough. Find better way to handle this counting.
-            # assert(epoch == int(sess.run([train_max_epoch_batch])[0]))
-            do_summary = epoch > 0 and epoch % train_summary_interval == 0
+
+            do_summary = train_summary_interval > 0 and epoch % train_summary_interval == 0
             if do_summary:
                 var_global_norm_v = 0.0
                 grad_global_norm_v = 0.0
-            do_model_summary = epoch % model_summary_interval == 0
+                if args.verbose:
+                    print("Generating train summary")
+
+            do_model_summary = model_summary_interval > 0 and epoch % model_summary_interval == 0
+            if do_model_summary:
+                model_summary_fetched = [[] for _ in train_model_hist_summary.fetches]
+                if args.verbose:
+                    print("Generating model summary")
             # do_summary = False
             # do_model_summary = False
-            # while True:
-            epoch_done = False
-            while not epoch_done:
+
+            # Training loop for one epoch
+            for record_count in xrange(0, train_input_pipeline.num_records, batch_size):
                 if args.verbose:
-                    print("Training batch # {} in epoch {}. Record # {}".format(batch_count, epoch, batch_count * batch_size))
-                train_fetches = [train_op, train_max_epoch_batch, loss, loss_min, loss_max]
-                summary_fetches = []
-                model_summary_fetches = []
+                    print("Training batch # {}, epoch {}, record # {}".format(batch_count, epoch, record_count))
+                    print("  Total batch # {}, total record # {}".format(total_batch_count, total_record_count))
+
+                # Create train op list
+                fetches = [train_op, loss, loss_min, loss_max]
+
                 if do_summary:
-                    summary_fetches = [var_global_norm, grad_global_norm]
-                if do_model_summary and batch_count == 0:
-                    model_summary_fetches = [model_summary_op]
+                    summary_offset = len(fetches)
+                    fetches.extend([var_global_norm, grad_global_norm])
+
+                if do_model_summary and batch_count < model_summary_num_batches:
+                    model_summary_offset = len(fetches)
+                    fetches.extend(train_model_hist_summary.fetches)
+
                 fetched =\
-                    sess.run(train_fetches + summary_fetches + model_summary_fetches,
-                             options=train_options, run_metadata=run_metadata)
-                _, max_data_epoch, loss_v, loss_min_v, loss_max_v = fetched[:len(train_fetches)]
-                fetch_offset = len(train_fetches)
+                    sess.run(fetches,
+                             options=train_options,
+                             run_metadata=run_metadata)
+                _, loss_v, loss_min_v, loss_max_v = fetched[:4]
+
                 if do_summary:
-                    var_global_norm_v += fetched[fetch_offset]
-                    grad_global_norm_v += fetched[fetch_offset + 1]
-                    fetch_offset += len(summary_fetches)
-                if do_model_summary and batch_count == 0:
-                    model_summary = fetched[fetch_offset]
-                    # fetch_offset += len(model_summary_fetches)
+                    var_global_norm_v += fetched[summary_offset]
+                    grad_global_norm_v += fetched[summary_offset + 1]
+
+                if do_model_summary and batch_count < model_summary_num_batches:
+                    for i, value in enumerate(fetched[model_summary_offset:]):
+                        # Make sure we copy the model summary tensors (otherwise it might be pinned GPU memory)
+                        model_summary_fetched[i].append(np.array(value))
+
                 if create_tf_timeline:
+                    # Save timeline traces
                     trace = timeline.Timeline(step_stats=run_metadata.step_stats)
                     with open('timeline.ctf.json', 'w') as trace_file:
                         trace_file.write(trace.generate_chrome_trace_format())
 
+                if args.verbose and batch_count == 0:
+                    # Print memory usage
+                    max_memory_gpu_v, peak_use_memory_gpu_v = sess.run([max_memory_gpu, peak_use_memory_gpu])
+                    print("Max memory on GPU: {} MB, peak used memory on GPU: {} MB".format(
+                        max_memory_gpu_v / 1024. / 1024., peak_use_memory_gpu_v / 1024. / 1024.))
+
                 total_loss_value += loss_v
                 total_loss_min = np.minimum(loss_min_v, total_loss_min)
                 total_loss_max = np.maximum(loss_max_v, total_loss_max)
-                # epoch_done = train_data_provider.consume_batch()
-                epoch_done = max_data_epoch > epoch
-                if args.verbose:
-                    print("Max data epoch: {}".format(max_data_epoch))
                 batch_count += 1
+                total_batch_count += 1
 
+            total_record_count += train_input_pipeline.num_records
             total_loss_value /= batch_count
 
             if do_summary:
+                if args.verbose:
+                    print("Writing train summary")
                 var_global_norm_v /= batch_count
                 grad_global_norm_v /= batch_count
                 summary, = sess.run([train_summary_op], feed_dict={
@@ -600,23 +674,51 @@ def run(args):
                     summary_grad_global_norm: grad_global_norm_v,
                 })
                 global_step = int(sess.run([global_step_tf])[0])
-                summary_writer.add_summary(summary, global_step=global_step)
-                summary_writer.flush()
+                try:
+                    summary_writer.add_summary(summary, global_step=global_step)
+                    summary_writer.flush()
+                    num_summary_errors = 0
+                except Exception, exc:
+                    print("ERROR: Exception when trying to write model summary: {}".format(exc))
+                    if num_summary_errors >= max_num_summary_errors:
+                        print("Too many summary errors occured. Aborting.")
+                        raise
             if do_model_summary:
-                print("Model summary")
+                feed_dict = {}
+                print("Concatenating model summaries")
+                for i, placeholder in enumerate(train_model_hist_summary.placeholders):
+                    feed_dict[placeholder] = np.concatenate(model_summary_fetched[i], axis=0)
+                if args.verbose:
+                    print("Building model summary")
+                model_summary = sess.run([train_model_hist_summary.summary_op], feed_dict=feed_dict)[0]
+                if args.verbose:
+                    print("Writing model summary")
                 global_step = int(sess.run([global_step_tf])[0])
-                summary_writer.add_summary(model_summary, global_step=global_step)
-                summary_writer.flush()
+                try:
+                    summary_writer.add_summary(model_summary, global_step=global_step)
+                    summary_writer.flush()
+                    num_summary_errors = 0
+                except Exception, exc:
+                    print("ERROR: Exception when trying to write model summary: {}".format(exc))
+                    if num_summary_errors >= max_num_summary_errors:
+                        print("Too many summary errors occured. Aborting.")
+                        raise
+                del model_summary_fetched
+                del feed_dict
+                del model_summary
 
             print("train result:")
             print("  epoch: {}, loss: {}, min loss: {}, max loss: {}".format(
                 epoch, total_loss_value, total_loss_min, total_loss_max))
-            print("train timing:")
-            print("  batches: {}, data time: {}, compute time: {}".format(
-                batch_count, data_time, compute_time))
+            epoch_time = timer.restart() / 60.
+            print("train stats:")
+            print("  batches: {}, records: {}, time: {} min".format(
+                batch_count, record_count, epoch_time))
+            print("  total batches: {}, total records: {}".format(
+                total_batch_count, total_record_count))
 
             # Heartbeat signal for Philly cluster
-            progress = float(epoch - initial_epoch) / (num_epochs - initial_epoch)
+            progress = 100 * float(epoch - initial_epoch) / (num_epochs - initial_epoch)
             print("PROGRESS: {:05.2f}%".format(progress))
 
             sess.run([inc_epoch])
@@ -628,25 +730,15 @@ def run(args):
                 total_loss_min = +np.finfo(np.float32).max
                 total_loss_max = -np.finfo(np.float32).max
                 batch_count = 0
-                # while True:
-                epoch_done = False
-                while not epoch_done:
-                    _, max_data_epoch, loss_v, loss_min_v, loss_max_v = sess.run([
-                        test_gpu_preload_op, test_max_epoch_batch, test_loss, test_loss_min, test_loss_max])
+                for record_count in xrange(0, test_input_pipeline.num_records, batch_size):
+                    _, loss_v, loss_min_v, loss_max_v = sess.run([
+                        test_input_pipeline.gpu_preload_op,
+                        test_loss, test_loss_min, test_loss_max])
                     total_loss_value += loss_v
                     total_loss_min = np.minimum(loss_min_v, total_loss_min)
                     total_loss_max = np.maximum(loss_max_v, total_loss_max)
-                    epoch_done = max_data_epoch > epoch
                     batch_count += 1
                 total_loss_value /= batch_count
-                print("------------")
-                print("test result:")
-                print("  epoch: {}, loss: {}, min loss: {}, max loss: {}".format(
-                    epoch, total_loss_value, total_loss_min, total_loss_max))
-                print("test timing:")
-                print("batches: {}, data time: {}, compute time: {}".format(
-                    batch_count, data_time, compute_time))
-                print("------------")
                 summary, = sess.run([test_summary_op], feed_dict={
                     summary_loss: total_loss_value,
                     summary_loss_min: total_loss_min,
@@ -655,23 +747,47 @@ def run(args):
                 global_step = int(sess.run([global_step_tf])[0])
                 summary_writer.add_summary(summary, global_step=global_step)
                 summary_writer.flush()
+                print("------------")
+                print("test result:")
+                print("  epoch: {}, loss: {}, min loss: {}, max loss: {}".format(
+                    epoch, total_loss_value, total_loss_min, total_loss_max))
+                record_count = batch_count * batch_size
+                epoch_time_min = timer.restart() / 60.
+                print("test stats:")
+                print("  batches: {}, records: {}, time: {} min".format(
+                    batch_count, record_count, epoch_time_min))
+                print("------------")
 
             if epoch > 0 and epoch % checkpoint_interval == 0:
-                print("Saving model at epoch {}".format(epoch))
-                saver.save(sess, os.path.join(args.store_path, "model"), global_step=global_step_tf)
+                saved = False
+                trials = 0
+                while not saved and trials < args.max_checkpoint_save_trials:
+                    try:
+                        trials += 1
+                        print("Saving model at epoch {}".format(epoch))
+                        saver.save(sess, os.path.join(args.store_path, "model"), global_step=global_step_tf)
+                        saved = True
+                        save_time = timer.restart()
+                        print("Saving took {} s".format(save_time))
+                    except Exception, exc:
+                        print("ERROR: Exception when trying to save model: {}".format(exc))
+                        if trials < args.max_checkpoint_save_trials:
+                            print("Retrying to save model in {} s...".format(retry_save_wait_time))
+                            time.sleep(retry_save_wait_time)
+                        else:
+                            raise
 
+        print("Saving final model")
         saver.save(sess, os.path.join(args.store_path, "model"), global_step=global_step_tf)
 
-    # except Exception, exc:
-    #     print("Exception in training loop: {}".format(exc))
-    #     coord.request_stop(exc)
-    #     raise exc
-    # except KeyboardInterrupt:
-    #     print("Keyboard interrupt in training loop")
+    except Exception, exc:
+        print("Exception in training loop: {}".format(exc))
+        coord.request_stop(exc)
+        raise exc
     finally:
         print("Requesting stop")
         coord.request_stop()
-        coord.join(enqueue_threads + custom_threads)
+        coord.join(custom_threads, stop_grace_period_secs=args.async_timeout)
 
 
 if __name__ == '__main__':
@@ -694,22 +810,33 @@ if __name__ == '__main__':
     parser.add_argument('--log-path', required=False, help='Log path.')
     parser.add_argument('--restore', action="store_true", help='Whether to restore existing model.')
 
+    # Report and checkpoint saving
+    parser.add_argument('--async_timeout', type=int, default=10 * 60)
+    parser.add_argument('--validation_interval', type=int, default=10)
+    parser.add_argument('--train_summary_interval', type=int, default=10)
+    parser.add_argument('--model_summary_interval', type=int, default=10)
+    parser.add_argument('--model_summary_num_batches', type=int, default=50)
+    parser.add_argument('--checkpoint_interval', type=int, default=50)
+    parser.add_argument('--keep_checkpoint_every_n_hours', type=float, default=2)
+    parser.add_argument('--keep_n_last_checkpoints', type=int, default=5)
+    parser.add_argument('--max_checkpoint_save_trials', type=int, default=5)
+
+    # Resource allocation
+    parser.add_argument('--intra_op_parallelism', type=int, default=1)
+    parser.add_argument('--inter_op_parallelism', type=int, default=4)
+    parser.add_argument('--gpu_memory_fraction', type=float, default=0.75)
+    parser.add_argument('--cpu_train_queue_capacity', type=int, default=1024 * 8)
+    parser.add_argument('--cpu_test_queue_capacity', type=int, default=1024 * 8)
+    parser.add_argument('--cpu_train_queue_min_after_dequeue', type=int, default=2000)
+    parser.add_argument('--cpu_test_queue_min_after_dequeue', type=int, default=0)
+    parser.add_argument('--cpu_train_queue_threads', type=int, default=4)
+    parser.add_argument('--cpu_test_queue_threads', type=int, default=1)
+
     # Train test split
     parser.add_argument('--train_test_split_ratio', type=float, default=4.0)
     parser.add_argument('--train_test_split_shuffle', action="store_true")
     parser.add_argument('--max_num_train_files', type=int, default=-1)
     parser.add_argument('--max_num_test_files', type=int, default=-1)
-
-    # Resource allocation
-    parser.add_argument('--intra_op_parallelism', type=int, default=1)
-    parser.add_argument('--inter_op_parallelism', type=int, default=4)
-    parser.add_argument('--gpu_memory_fraction', type=float, default=0.5)
-    parser.add_argument('--cpu_train_queue_capacity', type=int, default=1024 * 128)
-    parser.add_argument('--cpu_test_queue_capacity', type=int, default=1024 * 128)
-    parser.add_argument('--cpu_train_queue_min_after_dequeue', type=int, default=2000)
-    parser.add_argument('--cpu_test_queue_min_after_dequeue', type=int, default=0)
-    parser.add_argument('--cpu_train_queue_threads', type=int, default=4)
-    parser.add_argument('--cpu_test_queue_threads', type=int, default=1)
 
     # Learning parameters
     parser.add_argument('--num_epochs', type=int, default=10000)
@@ -720,14 +847,6 @@ if __name__ == '__main__':
     parser.add_argument('--learning_rate_decay_epochs', type=int, default=10)
     parser.add_argument('--learning_rate_decay_rate', type=float, default=0.96)
     parser.add_argument('--learning_rate_decay_staircase', type=argparse_bool, default=False)
-
-    # Report and checkpoint saving
-    parser.add_argument('--validation_interval', type=int, default=10)
-    parser.add_argument('--train_summary_interval', type=int, default=10)
-    parser.add_argument('--model_summary_interval', type=int, default=10)
-    parser.add_argument('--checkpoint_interval', type=int, default=50)
-    parser.add_argument('--keep_checkpoint_every_n_hours', type=float, default=2)
-    parser.add_argument('--keep_n_last_checkpoints', type=int, default=5)
 
     # Data parameters
     parser.add_argument('--target_id', type=str, default="prob_rewards")
@@ -742,11 +861,13 @@ if __name__ == '__main__':
     parser.add_argument('--initial_num_filters', type=int, default=8)
     parser.add_argument('--filter_increase_per_block', type=int, default=8)
     parser.add_argument('--filter_increase_within_block', type=int, default=0)
-    parser.add_argument('--maxpool_after_each_block', type=argparse_bool, default=False)
+    parser.add_argument('--maxpool_after_each_block', type=argparse_bool, default=True)
     parser.add_argument('--max_num_blocks', type=int, default=-1)
     parser.add_argument('--max_output_grid_size', type=int, default=8)
     parser.add_argument('--dropout_rate', type=float, default=0.5)
-    parser.add_argument('--add_biases_3dconv', type=argparse_bool, default=False)
+    parser.add_argument('--add_bias_3dconv', type=argparse_bool, default=False)
+    parser.add_argument('--use_batch_norm_3dconv', type=argparse_bool, default=False)
+    parser.add_argument('--use_batch_norm_regression', type=argparse_bool, default=False)
     parser.add_argument('--activation_fn_3dconv', type=str, default="relu")
     parser.add_argument('--num_units_regression', type=str, default="1024")
     parser.add_argument('--activation_fn_regression', type=str, default="relu")

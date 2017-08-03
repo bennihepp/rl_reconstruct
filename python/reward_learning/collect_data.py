@@ -9,6 +9,8 @@ import env_factory
 import file_helpers
 import RLrecon.environments.environment as RLenvironment
 
+import matplotlib.pyplot as plt
+
 
 def run(args):
     output_path = args.output_path
@@ -19,8 +21,10 @@ def run(args):
     num_records = args.num_records
     records_per_file = 1000
     reset_interval = 100
-    reset_score_threshold = 0.65
-    check_written_records = True
+    reset_score_threshold = 0.5
+    check_written_records = False
+
+    epsilon = 0.1
 
     obs_levels = [0, 1, 2, 3]
     obs_sizes_x = [16] * len(obs_levels)
@@ -33,21 +37,32 @@ def run(args):
     client_id = args.client_id
     environment = env_factory.create_environment(environment_class, client_id)
 
-    intrinsics = np.zeros((3, 3))
-    intrinsics[0, 0] = environment.get_engine().get_focal_length()
-    intrinsics[1, 1] = environment.get_engine().get_focal_length()
-    intrinsics[0, 2] = environment.get_engine().get_width() / 2
-    intrinsics[1, 2] = environment.get_engine().get_height() / 2
+    # environment.get_engine().test()
+
+    intrinsics = environment.get_engine().get_intrinsics()
 
     current_file_num = 0
-    score = 0.0
     records = []
     environment.reset()
+    prev_action = np.random.randint(0, environment.get_num_of_actions())
     for i in xrange(num_records):
         print("Record #{}".format(i))
-        if i % reset_interval == 0 or score >= reset_score_threshold:
-            environment.reset()
         current_pose = environment.get_pose()
+
+        result = environment.get_mapper().perform_info()
+        score = result.score
+        normalized_score = result.normalized_score
+        prob_score = result.probabilistic_score
+        normalized_prob_score = result.normalized_probabilistic_score
+        scores = np.array([score, normalized_score, prob_score, normalized_prob_score])
+
+        print("  scores: {}".format(scores))
+
+        if i % reset_interval == 0 or prob_score >= reset_score_threshold:
+            environment.reset()
+
+        new_poses = []
+        depth_images = []
 
         # Query octomap
         grid_3ds = None
@@ -65,19 +80,36 @@ def run(args):
             # observation_counts /= (10.0 * 2 ** obs_level)
             # observation_counts = np.minimum(observation_counts, 10.0)
             observation_counts_3d = np.reshape(observation_counts, (obs_size_x, obs_size_y, obs_size_z))
+            # Plot histograms
+            # num_bins = 50
+            # plt.figure()
+            # plt.hist(occupancies_3d.flatten(), num_bins)
+            # plt.title("occupancies level {}".format(obs_level))
+            # plt.figure()
+            # plt.hist(observation_counts.flatten(), num_bins)
+            # plt.title("observation counts level {}".format(obs_level))
+            # print("Stats for occupancies level {}".format(obs_level))
+            # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
+            #     np.mean(occupancies_3d.flatten()),
+            #     np.std(occupancies_3d.flatten()),
+            #     np.min(occupancies_3d.flatten()),
+            #     np.max(occupancies_3d.flatten()),
+            # ))
+            # print("Stats for observation count level {}".format(obs_level))
+            # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
+            #     np.mean(observation_counts.flatten()),
+            #     np.std(observation_counts.flatten()),
+            #     np.min(observation_counts.flatten()),
+            #     np.max(observation_counts.flatten()),
+            # ))
             grid_3d = np.stack([occupancies_3d, observation_counts_3d], axis=-1)
             if grid_3ds is None:
                 grid_3ds = grid_3d
             else:
                 grid_3ds = np.concatenate([grid_3ds, grid_3d], axis=-1)
+        # plt.show()
 
-        result = environment.get_mapper().perform_info()
-        score = result.score
-        normalized_score = result.normalized_score
-        prob_score = result.probabilistic_score
-        normalized_prob_score = result.normalized_probabilistic_score
-        scores = np.array([score, normalized_score, prob_score, normalized_prob_score])
-
+        # Simulate effect of actions and compute depth maps and rewards
         results = []
         rewards = np.zeros((environment.get_num_of_actions(),))
         norm_rewards = np.zeros((environment.get_num_of_actions(),))
@@ -87,8 +119,11 @@ def run(args):
             new_pose = environment.simulate_action_on_pose(current_pose, action)
             environment.set_pose(new_pose, wait_until_set=True)
             # point_cloud = environment._get_depth_point_cloud(new_pose)
-            # result = environment.get_mapper().perform_insert_point_cloud_rpy(new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
+            # result = environment.get_mapper().perform_insert_point_cloud_rpy(
+            #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
             depth_image = environment.get_engine().get_depth_image()
+            new_poses.append(new_pose)
+            depth_images.append(depth_image)
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 new_pose.location(), new_pose.orientation_rpy(),
                 depth_image, intrinsics, downsample_to_grid=True, simulate=True)
@@ -105,46 +140,65 @@ def run(args):
             norm_prob_rewards[action] = norm_prob_reward
             assert(prob_reward >= 0)
             results.append(result)
+
+        # Keep record for saving later
         record = data_record.RecordV2(obs_levels, grid_3ds, rewards, norm_rewards,
                                       prob_rewards, norm_prob_rewards, scores)
         records.append(record)
 
-        # Perform random action
-        action = np.random.randint(0, environment.get_num_of_actions())
-        new_pose = environment.simulate_action_on_pose(current_pose, action)
-        environment.set_pose(new_pose, wait_until_set=True)
-        # Sanity check of rewards
-        # point_cloud = environment._get_depth_point_cloud(new_pose)
-        # result = environment.get_mapper().perform_insert_point_cloud_rpy(new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=False)
-        # result = environment.get_mapper().perform_insert_point_cloud_rpy(new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
-        # result2 = environment.get_mapper().perform_insert_point_cloud_rpy(new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
-        # result2 = environment.get_mapper().perform_insert_point_cloud_rpy(new_pose.location(), new_pose.orientation_rpy(), point_cloud)
-        depth_image = environment.get_engine().get_depth_image()
-        # import cv2
-        # cv2.imshow("depth", depth_image / 10.)
-        # cv2.waitKey(10)
-        # and compute its reward
+        # Perform epsilon-greedy action.
+        if np.random.rand() < epsilon:
+            action = np.random.randint(0, environment.get_num_of_actions())
+        else:
+            max_prob_reward = np.max(prob_rewards)
+            actions = np.arange(environment.get_num_of_actions())[prob_rewards == max_prob_reward]
+            if len(actions) == 1:
+                action = actions[0]
+            else:
+                # If there is not a single best action, redo the previous one if it is one of the best.
+                if prev_action in actions:
+                    action = prev_action
+                else:
+                    action = np.random.choice(actions)
+
+        # TODO: When getting the depth image again here, sometimes it differs
+        #       from the depth image in the loop above (i.e. leading to a different reward).
+        #       It's not clear why this happens. Simple tests on Unreal Engine and UnrealCV
+        #       indicate that the depth maps do not change.
+        # new_pose = environment.simulate_action_on_pose(current_pose, action)
+        # environment.set_pose(new_pose, wait_until_set=True)
+        # depth_image = environment.get_engine().get_depth_image()
+        # result = environment.get_mapper().perform_insert_depth_map_rpy(
+        #     new_pose.location(), new_pose.orientation_rpy(),
+        #     depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+        #
+        # if not np.all(depth_image == depth_images[action]):
+        #     diff_image = np.abs(depth_image - depth_images[action])
+        #     print(np.sum(diff_image > 0))
+        #     print(np.max(diff_image))
+        #     max_depth = np.max(depth_image[diff_image > 0])
+        #     import cv2
+        #     cv2.imshow("depth_image1", depth_image / max_depth)
+        #     cv2.imshow("depth_image2", depth_images[action] / max_depth)
+        #     cv2.imshow("diff_image", diff_image / np.max(diff_image))
+        #     cv2.waitKey(0)
+        # assert(np.all(depth_image == depth_images[action]))
+
+        environment.set_pose(new_poses[action], wait_until_set=True)
         result = environment.get_mapper().perform_insert_depth_map_rpy(
-            new_pose.location(), new_pose.orientation_rpy(),
-            depth_image, intrinsics, downsample_to_grid=True, simulate=False)
-        score = result.normalized_score
-        # score = result2.normalized_score
-        if prob_rewards[action] != result.probabilistic_reward:
-            print(rewards[action], result.reward)
-            print(prob_rewards[action], result.probabilistic_reward)
-            print(results[action].score, result.score)
-            print(results[action].probabilistic_score, result.probabilistic_score)
+            new_poses[action].location(), new_poses[action].orientation_rpy(),
+            depth_images[action], intrinsics, downsample_to_grid=True, simulate=False)
+        print("Selected action: {}".format(action))
         assert(prob_rewards[action] == result.probabilistic_reward)
         # print("score={}".format(result.score))
         # print("probabilistic_score={}".format(result.probabilistic_score))
         # print("normalized_score={}".format(result.normalized_score))
         # print("normalized_probabilistic_score={}".format(result.normalized_probabilistic_score))
-        if record.rewards[action] != result.reward:
-            print(record.rewards[action], result.reward)
-            print(record.rewards[action], result.probabilistic_reward)
         assert(record.rewards[action] == result.reward)
 
         # print("action={}, reward={}".format(action, reward))
+
+        prev_action = action
 
         if not args.dry_run and len(records) % records_per_file == 0:
             # filename, current_file_num = get_next_output_tf_filename(current_file_num)

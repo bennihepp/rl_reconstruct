@@ -2,6 +2,8 @@ from __future__ import print_function
 
 from collections import namedtuple
 import threading
+import multiprocessing
+import Queue
 import numpy as np
 import h5py
 import tensorflow as tf
@@ -111,14 +113,15 @@ def write_hdf5_records_v2(filename, records):
 
 def read_hdf5_records_v2(filename):
     f = h5py.File(filename, "r")
-    obs_levels = f["grid_3ds"].attrs["obs_levels"]
-    obs_channels = f["grid_3ds"].attrs["obs_channels"]
+    obs_levels = np.array(f["grid_3ds"].attrs["obs_levels"])
+    obs_channels = np.array(f["grid_3ds"].attrs["obs_channels"])
     rewards = np.array(f["rewards"])
     norm_rewards = np.array(f["norm_rewards"])
     prob_rewards = np.array(f["prob_rewards"])
     norm_prob_rewards = np.array(f["norm_prob_rewards"])
     scores = np.array(f["scores"])
     grid_3ds = np.array(f["grid_3ds"])
+    f.close()
     assert(rewards.shape[0] == grid_3ds.shape[0])
     assert(norm_rewards.shape[0] == grid_3ds.shape[0])
     assert(prob_rewards.shape[0] == grid_3ds.shape[0])
@@ -138,8 +141,8 @@ def generate_single_records_from_batch_v2(record_batch):
         single_norm_prob_rewards = norm_prob_rewards[i, ...]
         single_scores = scores[i, ...]
         grid_3d = grid_3ds[i, ...]
-        record = RecordV2(obs_levels, grid_3d, single_rewards, single_prob_rewards,
-                          single_norm_rewards, single_norm_prob_rewards, single_scores)
+        record = RecordV2(obs_levels, grid_3d, single_rewards, single_norm_rewards,
+                          single_prob_rewards, single_norm_prob_rewards, single_scores)
         yield record
 
 
@@ -158,20 +161,14 @@ def read_hdf5_records_as_list(filename):
 
 
 def read_hdf5_records_v2_as_list(filename):
-    obs_levels, grid_3ds, rewards, norm_rewards, prob_rewards, norm_prob_rewards, scores = read_hdf5_records_v2(filename)
-    records = []
-    for i in xrange(rewards.shape[0]):
-        obs_levels = np.array(obs_levels)
-        single_rewards = rewards[i, ...]
-        single_norm_rewards = norm_rewards[i, ...]
-        single_prob_rewards = prob_rewards[i, ...]
-        single_norm_prob_rewards = norm_prob_rewards[i, ...]
-        single_scores = scores[i, ...]
-        grid_3d = grid_3ds[i, ...]
-        record = RecordV2(obs_levels, grid_3d, single_rewards, single_norm_rewards,
-                          single_prob_rewards, single_norm_prob_rewards, single_scores)
-        records.append(record)
+    record_batch = read_hdf5_records_v2(filename)
+    records = [record for record in generate_single_records_from_batch_v2(record_batch)]
     return records
+
+
+def count_records_in_hdf5_file_v2(filename):
+    record_batch = read_hdf5_records_v2(filename)
+    return record_batch.grid_3ds.shape[0]
 
 
 class HDF5QueueReader(object):
@@ -186,22 +183,21 @@ class HDF5QueueReader(object):
     def _run(self):
         record_count = 0
         while not self._coord.should_stop():
-            entry = self._filename_dequeue_fn()
-            if entry is None:
+            filename = self._filename_dequeue_fn()
+            if filename is None:
                 continue
-            filename, epoch = entry
             record_batch = read_hdf5_records_v2(filename)
             for record in generate_single_records_from_batch_v2(record_batch):
                 enqueued = False
                 while not enqueued:
-                    enqueued = self._enqueue_record_fn(record, epoch)
+                    enqueued = self._enqueue_record_fn(record)
                     if self._coord.should_stop():
                         break
                 if self._coord.should_stop():
                     break
                 record_count += 1
             if self._verbose:
-                print("Enqueued {} records. Current epoch is {}".format(record_count, epoch))
+                print("Enqueued {} records.".format(record_count))
         if self._verbose:
             print("Stop request... Exiting HDF5 queue reader thread")
 
@@ -209,6 +205,151 @@ class HDF5QueueReader(object):
         assert (self._thread is None)
         self._thread = threading.Thread(target=self._run)
         self._thread.start()
+
+    @property
+    def thread(self):
+        return self._thread
+
+
+class HDF5ReaderProcess(object):
+
+    def __init__(self, filename_queue, record_queue, verbose=False):
+        self._filename_queue = filename_queue
+        self._record_queue = record_queue
+        self._process = None
+        self._verbose = verbose
+        self._should_stop = True
+
+    def _run(self):
+        record_count = 0
+        while True:
+            filename = self._filename_queue.get(block=True)
+            if filename is None:
+                break
+            record_batch = read_hdf5_records_v2(filename)
+            for record in generate_single_records_from_batch_v2(record_batch):
+                self._record_queue.put(record, block=True)
+                record_count += 1
+            if self._verbose:
+                print("Enqueued {} records.".format(record_count))
+        if self._verbose:
+            print("Stop request... Exiting HDF5 queue reader process")
+
+    def start(self):
+        assert (self._process is None)
+        self._should_stop = False
+        self._process = multiprocessing.Process(target=self._run)
+        self._process.start()
+
+    def is_alive(self):
+        if self._process is None:
+            return False
+        else:
+            return self._process.is_alive()
+
+    def join(self):
+        if self._process is not None:
+            self._process.join()
+
+    @property
+    def process(self):
+        return self._process
+
+
+class HDF5ReaderProcessCoordinator(object):
+
+    def __init__(self, filenames, coord, shuffle, timeout=60, num_processes=1,
+                 record_queue_capacity=1024, verbose=False):
+        self._filenames = list(filenames)
+        self._coord = coord
+        self._shuffle = shuffle
+        self._timeout = timeout
+        self._num_processes = num_processes
+        self._record_queue_capacity = record_queue_capacity
+        self._verbose = verbose
+
+        self._thread = None
+
+        self._initialize_queue_and_readers()
+
+    def _initialize_queue_and_readers(self):
+        self._record_queue = multiprocessing.Queue(maxsize=self._record_queue_capacity)
+        self._filename_queue = multiprocessing.Queue(maxsize=2 * len(self._filenames))
+        self._reader_processes = [
+            HDF5ReaderProcess(self._filename_queue, self._record_queue, self._verbose)
+            for _ in xrange(self._num_processes)]
+
+    def _start_readers(self):
+        for reader in self._reader_processes:
+            assert(not reader.is_alive())
+            reader.start()
+
+    def _stop_readers(self):
+        self._record_queue.close()
+        self._filename_queue.close()
+        self._record_queue.join_thread()
+        self._filename_queue.join_thread()
+        if self._verbose:
+            print("Terminating HDF5ReaderProcesses to stop")
+        for reader in self._reader_processes:
+            reader.process.terminate()
+        if self._verbose:
+            print("Resetting queue and HDF5ReaderProcesses")
+        self._initialize_queue_and_readers()
+
+    def _run(self):
+        while not self._coord.should_stop():
+            if self._shuffle:
+                np.random.shuffle(self._filenames)
+            for filename in self._filenames:
+                enqueued = False
+                while not enqueued:
+                    try:
+                        self._filename_queue.put(filename, block=True, timeout=self._timeout)
+                        enqueued = True
+                    except Queue.Full:
+                        pass
+                    if self._coord.should_stop():
+                        break
+                if self._coord.should_stop():
+                    break
+        # Terminate reader processes
+        self._stop_readers()
+        if self._verbose:
+            print("Stop request... Exiting HDF5ReaderProcessCoordinator queue thread")
+
+    def get_next_record(self):
+        while not self._coord.should_stop():
+            try:
+                return self._record_queue.get(block=True, timeout=self._timeout)
+            except Queue.Empty:
+                pass
+        if self._verbose:
+            print("Stop request... Exiting HDF5ReaderProcessCoordinator queue thread")
+        raise StopIteration()
+
+    def start(self):
+        assert (self._thread is None)
+        self._thread = threading.Thread(target=self._run)
+        self._thread.start()
+        self._start_readers()
+
+    def compute_num_records(self):
+        p = multiprocessing.Pool(self._num_processes)
+        # TODO: This blocks on Ctrl-C
+        try:
+            record_counts_async = p.map_async(count_records_in_hdf5_file_v2, self._filenames, chunksize=1)
+            # Workaround to enable KeyboardInterrupt (with p.map() or record_counts_async.get() it won't be received)
+            record_counts = record_counts_async.get(np.iinfo(np.int32).max)
+            record_count = np.sum(record_counts)
+            p.close()
+            p.join()
+        except Exception, exc:
+            print("Exception occured when computing num records: {}".format(exc))
+            p.close()
+            p.terminate()
+            raise
+        return record_count
 
     @property
     def thread(self):
