@@ -277,7 +277,7 @@ class ModelModule(object):
 
     def _get_config(self, name, default=None):
         if isinstance(self._config, dict):
-            return self._config[name]
+            return self._config.get(name, default)
         else:
             return getattr(self._config, name, default)
 
@@ -336,7 +336,8 @@ class Conv3DModule(ModelModule):
                  config,
                  input,
                  is_training=True,
-                 variables_collections=None):
+                 variables_collections=None,
+                 verbose=False):
         super(Conv3DModule, self).__init__(config)
 
         num_convs_per_block = self._get_config("num_convs_per_block", 2)
@@ -347,9 +348,9 @@ class Conv3DModule(ModelModule):
         max_num_blocks = self._get_config("max_num_blocks", -1)
         max_output_grid_size = self._get_config("max_output_grid_size", 8)
         dropout_rate = self._get_config("dropout_rate", 0.3)
-        add_bias = self._get_config("add_bias_3dconv")
-        use_batch_norm = self._get_config("use_batch_norm_conv3d", True)
-        activation_fn = self._get_activation_fn(self._get_config("activation_fn_conv3d"))
+        add_bias = self._get_config("add_bias")
+        use_batch_norm = self._get_config("use_batch_norm", True)
+        activation_fn = self._get_activation_fn(self._get_config("activation_fn"))
 
         if use_batch_norm:
             assert not add_bias
@@ -361,7 +362,9 @@ class Conv3DModule(ModelModule):
             assert(max_output_grid_size > 0)
 
         x = input
-        print("input:", x.shape)
+        if verbose:
+            print("--- Conv3DModule ---")
+            print("  input:", x.shape)
 
         num_filters = initial_num_filters
         i = 0
@@ -389,7 +392,8 @@ class Conv3DModule(ModelModule):
                         x = tf.nn.max_pool3d(x, ksize, strides, padding="SAME")
                 elif max_output_grid_size > 0:
                     done = True
-            print("x.shape:", i, x.shape)
+            if verbose:
+                print("  x.shape:", i, x.shape)
             # Make layer accessible from outside
             with tf.variable_scope(tf.get_variable_scope(), reuse=True) as scope:
                 for j in xrange(num_convs_per_block):
@@ -413,7 +417,8 @@ class Conv3DModule(ModelModule):
         if dropout_rate > 0 and is_training:
             keep_prob = 1 - dropout_rate
             x = tf.nn.dropout(x, keep_prob=keep_prob, name="dropout")
-            print("x.shape, dropout:", x.shape)
+            if verbose:
+                print("x.shape, dropout:", x.shape)
             self._add_summary("dropout_activations", x)
 
         self._set_output(x)
@@ -426,22 +431,26 @@ class RegressionModule(ModelModule):
                  input,
                  num_outputs,
                  is_training=True,
-                 variables_collections=None):
+                 variables_collections=None,
+                 verbose=False):
         super(RegressionModule, self).__init__(config)
 
-        num_units = self._get_config_int_list("num_units_regression")
+        num_units = self._get_config_int_list("num_units")
         assert(num_units is not None)
-        use_batch_norm = self._get_config("use_batch_norm_regression", True)
+        use_batch_norm = self._get_config("use_batch_norm", True)
         batch_norm_after_activation = self._get_config("batch_norm_after_activation", True)
         add_bias = not use_batch_norm
-        use_fully_convolutional = self._get_config("use_fully_convolutional", True)
-        activation_fn = self._get_activation_fn(self._get_config("activation_fn_regression"))
+        fully_convolutional = self._get_config("fully_convolutional", True)
+        activation_fn = self._get_activation_fn(self._get_config("activation_fn"))
 
         x = input
+        if verbose:
+            print("--- RegressionModule ---")
+            print("  input:", x.shape)
 
         for i in xrange(len(num_units)):
             with tf.variable_scope('fc_{}'.format(i)) as scope:
-                if use_fully_convolutional:
+                if fully_convolutional:
                     filter_size = [int(s) for s in x.shape[1:-1]]
                     stride = [1, 1, 1]
                     x = tf_utils.conv3d(
@@ -462,24 +471,27 @@ class RegressionModule(ModelModule):
                         batch_norm_after_activation=batch_norm_after_activation,
                         is_training=is_training,
                         collections=variables_collections)
-                print("activations.shape, fc_{}:".format(i), x.shape)
+                if verbose:
+                    print("activations.shape, fc_{}:".format(i), x.shape)
                 self._add_summary("fc_{}/activations".format(i), x)
             with tf.variable_scope(scope, reuse=True):
                 # Make layer accessible from outside
                 weights = tf.get_variable('weights')
-                print("{}: {}".format(weights.name, weights.shape))
+                if verbose:
+                    print("{}: {}".format(weights.name, weights.shape))
                 if use_batch_norm:
                     biases = tf.get_variable("bn/beta")
                 else:
                     biases = tf.get_variable('biases')
-                print("{}: {}".format(biases.name, biases.shape))
+                if verbose:
+                        print("{}: {}".format(biases.name, biases.shape))
                 # Add summaries for layer
                 self._add_summary("fc_{}/weights".format(i), weights)
                 self._add_summary("fc_{}/biases".format(i), biases)
             self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
 
         with tf.variable_scope('output') as scope:
-            if use_fully_convolutional:
+            if fully_convolutional:
                 filter_size = [int(s) for s in x.shape[1:-1]]
                 stride = [1, 1, 1]
                 x = tf_utils.conv3d(x, num_outputs, filter_size, stride,
@@ -500,13 +512,16 @@ class RegressionModule(ModelModule):
                                              is_training=is_training,
                                              collections=variables_collections)
             self._add_summary("output/activations", x)
-            print("output.shape:", x.shape)
+            if verbose:
+                print("output.shape:", x.shape)
         with tf.variable_scope(scope, reuse=True):
             # Make layer accessible from outside
             weights = tf.get_variable('weights')
-            print("{}: {}".format(weights.name, weights.shape))
+            if verbose:
+                print("{}: {}".format(weights.name, weights.shape))
             biases = tf.get_variable('biases')
-            print("{}: {}".format(biases.name, biases.shape))
+            if verbose:
+                print("{}: {}".format(biases.name, biases.shape))
             # Add summaries for layer
             self._add_summary("output/weights", weights)
             self._add_summary("output/biases", biases)
@@ -517,23 +532,26 @@ class RegressionModule(ModelModule):
 
 class Model(ModelModule):
 
-    def __init__(self, config, input, target_shape, is_training=True, variables_collections=None):
+    def __init__(self, config, input_batch, target_batch, is_training=True,
+                 variables_collections=None, verbose=False):
         super(Model, self).__init__(config)
 
-        assert(len(target_shape) == 1)
+        target_shape = [int(s) for s in target_batch.shape[1:]]
         num_outputs = target_shape[-1]
 
         self._conv3d_module = Conv3DModule(
-            self._config,
-            input,
+            self._config["conv3d"],
+            input_batch,
             is_training=is_training,
-            variables_collections=variables_collections)
+            variables_collections=variables_collections,
+            verbose=verbose)
         self._regression_module = RegressionModule(
-            self._config,
+            self._config["regression"],
             self._conv3d_module.output,
             num_outputs,
             is_training=is_training,
-            variables_collections=variables_collections)
+            variables_collections=variables_collections,
+            verbose=verbose)
 
         self._set_output(self._regression_module.output)
         self._add_variables(self._conv3d_module.variables)
@@ -545,6 +563,29 @@ class Model(ModelModule):
         self._modules = {"conv3d": self._conv3d_module,
                          "regression": self._regression_module}
 
+        self._loss_batch = tf.reduce_mean(
+            tf.square(self.output - target_batch),
+            axis=-1, name="loss_batch")
+        self._loss = tf.reduce_mean(self._loss_batch, name="loss")
+        self._loss_min = tf.reduce_min(self._loss_batch, name="loss_min")
+        self._loss_max = tf.reduce_max(self._loss_batch, name="loss_max")
+
     @property
     def modules(self):
         return self._modules
+
+    @property
+    def loss_batch(self):
+        return self._loss_batch
+
+    @property
+    def loss(self):
+        return self._loss
+
+    @property
+    def loss_min(self):
+        return self._loss_min
+
+    @property
+    def loss_max(self):
+        return self._loss_max

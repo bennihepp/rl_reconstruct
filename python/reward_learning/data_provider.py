@@ -4,6 +4,148 @@ import threading
 import Queue
 import tensorflow as tf
 import tensorflow.contrib.staging as tf_staging
+import tf_utils
+
+
+class QueueBridge(object):
+    def __init__(self, dequeue_fn, enqueue_fn, coord, verbose=False):
+        self._dequeue_fn = dequeue_fn
+        self._enqueue_fn = enqueue_fn
+        self._coord = coord
+        self._thread = None
+        self._verbose = verbose
+
+    def _run(self):
+        while not self._coord.should_stop():
+            entry = self._dequeue_fn()
+            if entry is None:
+                continue
+            self._enqueue_fn(entry)
+        if self._verbose:
+            print("Stop request... Exiting QueueBridge thread")
+
+    def start(self):
+        assert (self._thread is None)
+        self._thread = threading.Thread(target=self._run)
+        self._thread.start()
+
+    @property
+    def thread(self):
+        return self._thread
+
+
+class TFInputPipeline(object):
+
+    def _gpu_preload_pipeline(self, tensors, gpu_device_name="/gpu:0"):
+        with tf.device(gpu_device_name):
+            gpu_staging_area = tf_staging.StagingArea(
+                dtypes=[tensor.dtype for tensor in tensors],
+                shapes=[tensor.shape for tensor in tensors])
+        gpu_preload_op = gpu_staging_area.put(tensors)
+        gpu_tensors = gpu_staging_area.get()
+        return gpu_preload_op, gpu_tensors
+
+    def __init__(self, tensor_provider_fn, sess, coord, batch_size,
+                 tensor_shapes, tensor_dtypes,
+                 queue_capacity, min_after_dequeue,
+                 shuffle, num_threads,
+                 gpu_device_name=tf_utils.gpu_device_name(),
+                 timeout=60, name=None, verbose=False):
+        with tf.device("/cpu:0"):
+            # Create python-TF data bridge
+            assert(queue_capacity > min_after_dequeue)
+            self._data_bridge = TFDataBridge(
+                sess, batch_size,
+                shapes=tensor_shapes,
+                dtypes=tensor_dtypes,
+                queue_capacity=queue_capacity,
+                min_after_dequeue=min_after_dequeue,
+                shuffle=shuffle,
+                timeout=timeout,
+                name=name,
+                verbose=verbose)
+
+            # We need an extra thread that dequeues from the multiprocessing queue
+            # and enqueues on the threading queue
+            self._queue_bridges = [QueueBridge(
+                tensor_provider_fn,
+                self._data_bridge.enqueue,
+                coord, verbose) for _ in xrange(num_threads)]
+
+            # Retrieve tensors from data bridge
+            self._tensors = self._data_bridge.deque_batch()
+            # Generate GPU preload operations
+            self._gpu_preload_op, self._tensors = \
+                self._gpu_preload_pipeline(self._tensors, gpu_device_name)
+
+    def start(self):
+        for bridge in self._queue_bridges:
+            bridge.start()
+
+    @property
+    def gpu_preload_op(self):
+        return self._gpu_preload_op
+
+    @property
+    def tensors(self):
+        return self._tensors
+
+    @property
+    def threads(self):
+        return [bridge.thread for bridge in self._queue_bridges]
+
+
+class FilenameQueueProvider(object):
+    def __init__(self, filenames, coord, shuffle, timeout=60, verbose=False):
+        self._coord = coord
+        self._shuffle = shuffle
+        self._timeout = timeout
+        self._verbose = verbose
+        # Make copy
+        self._filenames = list(filenames)
+        self._filename_queue = Queue.Queue(maxsize=2 * len(self._filenames))
+        self._epoch = 0
+        self._thread = None
+
+    def _run(self):
+        while not self._coord.should_stop():
+            if self._shuffle:
+                np.random.shuffle(self._filenames)
+            for filename in self._filenames:
+                entry = (filename, self._epoch)
+                enqueued = False
+                while not enqueued:
+                    try:
+                        self._filename_queue.put(entry, block=True, timeout=self._timeout)
+                        enqueued = True
+                    except Queue.Full:
+                        pass
+                    if self._coord.should_stop():
+                        break
+                if self._coord.should_stop():
+                    break
+            self._epoch += 1
+        if self._verbose:
+            print("Stop request... Exiting filename queue thread")
+
+    def start(self):
+        assert (self._thread is None)
+        self._thread = threading.Thread(target=self._run)
+        self._thread.start()
+
+    def get_next(self):
+        while not self._coord.should_stop():
+            try:
+                return self._filename_queue.get(block=True, timeout=self._timeout)
+            except Queue.Empty:
+                pass
+        if self._verbose:
+            print("Stop request... exiting filename queue get next loop")
+        raise StopIteration()
+
+    @property
+    def thread(self):
+        return self._thread
 
 
 class TFDataBridge(object):

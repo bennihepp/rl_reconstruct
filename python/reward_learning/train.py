@@ -11,6 +11,7 @@ import data_record
 import file_helpers
 import models
 import numpy as np
+import yaml
 import tensorflow as tf
 import tensorflow.contrib.staging as tf_staging
 import tensorflow.contrib.layers as tf_layers
@@ -19,6 +20,60 @@ import tf_utils
 import data_provider
 from tensorflow.python.client import timeline
 from RLrecon.utils import Timer
+
+
+def compute_dataset_stats(filenames):
+    assert(len(filenames) > 0)
+    tmp_record_batch = data_record.read_hdf5_records_v2(filenames[0])
+    grid_3d_shape = tmp_record_batch.grid_3ds.shape[1:]
+    data_size = 0
+    sum_grid_3d_np = np.zeros(grid_3d_shape)
+    sq_sum_grid_3d_np = np.zeros(sum_grid_3d_np.shape)
+    for filename in filenames:
+        tmp_record_batch = data_record.read_hdf5_records_v2(filename)
+        grid_3ds = tmp_record_batch.grid_3ds
+        sum_grid_3d_np += np.sum(grid_3ds, axis=0)
+        sq_sum_grid_3d_np += np.sum(np.square(grid_3ds), axis=0)
+        data_size += grid_3ds.shape[0]
+    mean_grid_3d_np = sum_grid_3d_np / data_size
+    stddev_grid_3d_np = (sq_sum_grid_3d_np - np.square(sum_grid_3d_np) / data_size) / (data_size - 1)
+    stddev_grid_3d_np[np.abs(stddev_grid_3d_np) < 1e-5] = 1
+    stddev_grid_3d_np = np.sqrt(stddev_grid_3d_np)
+    sum_z_score = np.zeros(grid_3d_shape)
+    sq_sum_z_score = np.zeros(grid_3d_shape)
+    for filename in filenames:
+        tmp_record_batch = data_record.read_hdf5_records_v2(filename)
+        grid_3ds = tmp_record_batch.grid_3ds
+        z_score = (grid_3ds - mean_grid_3d_np[np.newaxis, ...]) / stddev_grid_3d_np[np.newaxis, ...]
+        assert(np.all(np.isfinite(z_score.flatten())))
+        sum_z_score += np.sum(z_score, axis=0)
+        sq_sum_z_score += np.sum(np.square(z_score), axis=0)
+    mean_z_score = sum_z_score / data_size
+    stddev_z_score = (sq_sum_z_score - np.square(sum_z_score) / data_size) / (data_size - 1)
+    stddev_z_score[np.abs(stddev_z_score) < 1e-5] = 1
+    stddev_z_score = np.sqrt(stddev_z_score)
+    return data_size, mean_grid_3d_np, stddev_grid_3d_np, mean_z_score, stddev_z_score
+
+
+def get_model_config_from_cmdline(args):
+    config = {}
+    config["conv3d"] = {}
+    config["conv3d"]["num_convs_per_block"] = args.num_convs_per_block
+    config["conv3d"]["initial_num_filters"] = args.initial_num_filters
+    config["conv3d"]["filter_increase_per_block"] = args.filter_increase_per_block
+    config["conv3d"]["filter_increase_within_block"] = args.filter_increase_within_block
+    config["conv3d"]["maxpool_after_each_block"] = args.maxpool_after_each_block
+    config["conv3d"]["max_num_blocks"] = args.max_num_blocks
+    config["conv3d"]["max_output_grid_size"] = args.max_output_grid_size
+    config["conv3d"]["dropout_rate"] = args.dropout_rate
+    config["conv3d"]["add_bias"] = args.add_bias_3dconv
+    config["conv3d"]["use_batch_norm"] = args.use_batch_norm_3dconv
+    config["conv3d"]["activation_fn"] = args.activation_fn_3dconv
+    config["regression"] = {}
+    config["regression"]["use_batch_norm"] = args.use_batch_norm_regression
+    config["regression"]["num_units"] = args.num_units_regression
+    config["regression"]["activation_fn"] = args.activation_fn_regression
+    return config
 
 
 def run(args):
@@ -90,7 +145,7 @@ def run(args):
     assert(tmp_record_batch.grid_3ds.shape[0] > 0)
     tmp_records = list(data_record.generate_single_records_from_batch_v2(tmp_record_batch))
     tmp_record = tmp_records[0]
-    print("obs_levels in data record: {}".format(tmp_record.obs_levels))
+    print("Observation levels in data record: {}".format(tmp_record.obs_levels))
     raw_grid_3d = tmp_record.grid_3d
     # Determine subvolume slices
     if args.subvolume_slice_x is None:
@@ -115,11 +170,11 @@ def run(args):
             grid_3d_channels.append(2 * level)
             grid_3d_channels.append(2 * level + 1)
     # Print used subvolume slices and channels
-    print("subvolume_slice_x: {}".format(subvolume_slice_x))
-    print("subvolume_slice_y: {}".format(subvolume_slice_y))
-    print("subvolume_slice_z: {}".format(subvolume_slice_z))
-    print("grid_3d_channels: {}".format(grid_3d_channels))
-    print("target_id: {}".format(args.target_id))
+    print("Subvolume slice x: {}".format(subvolume_slice_x))
+    print("subvolume slice y: {}".format(subvolume_slice_y))
+    print("subvolume slice z: {}".format(subvolume_slice_z))
+    print("Channels of grid_3d: {}".format(grid_3d_channels))
+    print("Target id: {}".format(args.target_id))
 
     # Retrieval functions for input and target from data records
 
@@ -167,34 +222,35 @@ def run(args):
 
     # Report some stats on input and outputs for the first data file
     # This is only for sanity checking
-    for channel in grid_3d_channels:
-        print("mean channel {}: {}".format(channel, np.mean(tmp_record_batch.grid_3ds[..., channel])))
-        print("stddev channel {}: {}".format(channel, np.std(tmp_record_batch.grid_3ds[..., channel])))
-        print("min channel {}: {}".format(channel, np.min(tmp_record_batch.grid_3ds[..., channel])))
-        print("max channel {}: {}".format(channel, np.max(tmp_record_batch.grid_3ds[..., channel])))
-    tmp_inputs = [get_input_from_record(record) for record in tmp_records]
-    for i in xrange(tmp_inputs[0].shape[-1]):
-        values = [input[..., i] for input in tmp_inputs]
-        print("mean for input {}: {}".format(i, np.mean(values)))
-        print("stddev for input {}: {}".format(i, np.std(values)))
-        print("min for input {}: {}".format(i, np.min(values)))
-        print("max for input {}: {}".format(i, np.max(values)))
-    tmp_targets = [get_target_from_record(record) for record in tmp_records]
-    for i in xrange(tmp_targets[0].shape[-1]):
-        values = [target[..., i] for target in tmp_targets]
-        print("mean for target {}: {}".format(i, np.mean(values)))
-        print("stddev for target {}: {}".format(i, np.std(values)))
-        print("min for target {}: {}".format(i, np.min(values)))
-        print("max for target {}: {}".format(i, np.max(values)))
+    if args.verbose:
+        for channel in grid_3d_channels:
+            print("Mean of channel {}: {}".format(channel, np.mean(tmp_record_batch.grid_3ds[..., channel])))
+            print("Stddev of channel {}: {}".format(channel, np.std(tmp_record_batch.grid_3ds[..., channel])))
+            print("Min of channel {}: {}".format(channel, np.min(tmp_record_batch.grid_3ds[..., channel])))
+            print("Max of channel {}: {}".format(channel, np.max(tmp_record_batch.grid_3ds[..., channel])))
+        tmp_inputs = [get_input_from_record(record) for record in tmp_records]
+        for i in xrange(tmp_inputs[0].shape[-1]):
+            values = [input[..., i] for input in tmp_inputs]
+            print("Mean of input {}: {}".format(i, np.mean(values)))
+            print("Stddev of input {}: {}".format(i, np.std(values)))
+            print("Min of input {}: {}".format(i, np.min(values)))
+            print("Max of input {}: {}".format(i, np.max(values)))
+        tmp_targets = [get_target_from_record(record) for record in tmp_records]
+        for i in xrange(tmp_targets[0].shape[-1]):
+            values = [target[..., i] for target in tmp_targets]
+            print("Mean of target {}: {}".format(i, np.mean(values)))
+            print("Stddev of target {}: {}".format(i, np.std(values)))
+            print("Min of target {}: {}".format(i, np.min(values)))
+            print("Max of target {}: {}".format(i, np.max(values)))
 
     # Retrieve input and target shapes
     grid_3d = tmp_record.grid_3d
     grid_3d_shape = list(grid_3d.shape)
     input_shape = list(get_input_from_record(tmp_record).shape)
     target_shape = list(get_target_from_record(tmp_record).shape)
-    print("grid_3d_shape: {}".format(grid_3d_shape))
-    print("input_shape: {}".format(input_shape))
-    print("target_shape: {}".format(target_shape))
+    print("Shape of grid_3d: {}".format(grid_3d_shape))
+    print("Shape of input: {}".format(input_shape))
+    print("Shape of target: {}".format(target_shape))
 
     # Mean and stddev of input for normalization
     input_stats_filename = args.input_stats_filename
@@ -207,38 +263,10 @@ def run(args):
         stddev_grid_3d_np = numpy_dict["stddev_grid_3d"]
         tmp_record_batch = data_record.read_hdf5_records_v2(all_filenames[0])
         assert(np.all(numpy_dict["mean_grid_3d"].shape == tmp_record_batch.grid_3ds.shape[1:]))
-        print("all_data_size:", all_data_size)
     else:
         print("Computing data statistics")
-        all_data_size = 0
-        sum_grid_3d_np = np.zeros(grid_3d_shape)
-        sq_sum_grid_3d_np = np.zeros(grid_3d_shape)
-        for filename in all_filenames:
-            tmp_record_batch = data_record.read_hdf5_records_v2(filename)
-            grid_3ds = tmp_record_batch.grid_3ds
-            sum_grid_3d_np += np.sum(grid_3ds, axis=0)
-            sq_sum_grid_3d_np += np.sum(np.square(grid_3ds), axis=0)
-            all_data_size += grid_3ds.shape[0]
-        mean_grid_3d_np = sum_grid_3d_np / all_data_size
-        stddev_grid_3d_np = (sq_sum_grid_3d_np - np.square(sum_grid_3d_np) / all_data_size) / (all_data_size - 1)
-        stddev_grid_3d_np[np.abs(stddev_grid_3d_np) < 1e-5] = 1
-        stddev_grid_3d_np = np.sqrt(stddev_grid_3d_np)
-        print("all_data_size:", all_data_size)
-        print("mean_grid_3d_np:", np.mean(mean_grid_3d_np.flatten()))
-        print("stddev_grid_3d_np:", np.mean(stddev_grid_3d_np.flatten()))
-        sum_z_score = np.zeros(grid_3d_shape)
-        sq_sum_z_score = np.zeros(grid_3d_shape)
-        for filename in all_filenames:
-            tmp_record_batch = data_record.read_hdf5_records_v2(filename)
-            grid_3ds = tmp_record_batch.grid_3ds
-            z_score = (grid_3ds - mean_grid_3d_np[np.newaxis, ...]) / stddev_grid_3d_np[np.newaxis, ...]
-            assert(np.all(np.isfinite(z_score.flatten())))
-            sum_z_score += np.sum(z_score, axis=0)
-            sq_sum_z_score += np.sum(np.square(z_score), axis=0)
-        mean_z_score = sum_z_score / all_data_size
-        stddev_z_score = (sq_sum_z_score - np.square(sum_z_score) / all_data_size) / (all_data_size - 1)
-        stddev_z_score[np.abs(stddev_z_score) < 1e-5] = 1
-        stddev_z_score = np.sqrt(stddev_z_score)
+        all_data_size, mean_grid_3d_np, stddev_grid_3d_np, mean_z_score, stddev_z_score \
+            = compute_dataset_stats(all_filenames)
         if not np.all(np.abs(mean_z_score) < 1e-2):
             print("mean_z_score")
             print(mean_z_score)
@@ -260,8 +288,9 @@ def run(args):
             "mean_z_score": mean_z_score,
             "stddev_z_score": stddev_z_score,
         })
-
-    del tmp_record_batch
+    print("Mean of grid_3d:", np.mean(mean_grid_3d_np.flatten()))
+    print("Stddev of grid_3d:", np.mean(stddev_grid_3d_np.flatten()))
+    print("Size of full dataset:", all_data_size)
 
     mean_record = data_record.RecordV2(None, mean_grid_3d_np, None, None, None, None, None)
     mean_input_np = get_input_from_record(mean_record)
@@ -275,23 +304,16 @@ def run(args):
     inc_epoch = epoch_tf.assign_add(tf.constant(1, dtype=tf.int64))
 
     # Configure tensorflow
-    config = tf.ConfigProto()
-    config.gpu_options.per_process_gpu_memory_fraction = args.gpu_memory_fraction
-    config.intra_op_parallelism_threads = args.intra_op_parallelism
-    config.inter_op_parallelism_threads = args.inter_op_parallelism
+    tf_config = tf.ConfigProto()
+    tf_config.gpu_options.per_process_gpu_memory_fraction = args.gpu_memory_fraction
+    tf_config.intra_op_parallelism_threads = args.intra_op_parallelism
+    tf_config.inter_op_parallelism_threads = args.inter_op_parallelism
     # config.log_device_placement = True
 
-    sess = tf.Session(config=config)
+    sess = tf.Session(config=tf_config)
     coord = tf.train.Coordinator()
 
     class InputPipeline(object):
-
-        def _dequeue_record_factory(self, hdf5_input_pipeline):
-            def dequeue_record():
-                record = hdf5_input_pipeline.get_next_record()
-                return record
-
-            return dequeue_record
 
         def _preprocess_record(self, record):
             single_input = get_input_from_record(record)
@@ -301,59 +323,40 @@ def run(args):
             # single_target = -np.ones(single_target.shape)
             return single_input, single_target
 
-        def _enqueue_record_with(self, data_bridge):
-            def enqueue_record(record):
+        def _record_provider_factory(self, hdf5_input_pipeline):
+            def record_provider():
+                record = hdf5_input_pipeline.get_next_record()
                 single_input, single_target = self._preprocess_record(record)
-                return data_bridge.enqueue([single_input, single_target])
-
-            return enqueue_record
-
-        def _gpu_preload_pipeline(self, input_batch, target_batch, gpu_device_name="/gpu:0"):
-            with tf.device(gpu_device_name):
-                gpu_staging_area = tf_staging.StagingArea(
-                    dtypes=[input_batch.dtype, target_batch.dtype],
-                    shapes=[input_batch.shape, target_batch.shape])
-            gpu_preload_op = gpu_staging_area.put([input_batch, target_batch])
-            gpu_input_batch, gpu_target_batch = gpu_staging_area.get()
-            return gpu_preload_op, gpu_input_batch, gpu_target_batch
+                return single_input, single_target
+            return record_provider
 
         def __init__(self, filenames, queue_capacity, min_after_dequeue, shuffle, num_threads, name):
-            with tf.device("/cpu:0"):
-                # Create HDF5 readers
-                self._hdf5_input_pipeline = data_record.HDF5ReaderProcessCoordinator(
-                    filenames, coord, shuffle=shuffle, timeout=args.async_timeout,
-                    num_processes=num_threads, verbose=args.verbose)
-                self._num_records = None
+            # Create HDF5 readers
+            self._hdf5_input_pipeline = data_record.HDF5ReaderProcessCoordinator(
+                filenames, coord, shuffle=shuffle, timeout=args.async_timeout,
+                num_processes=num_threads, verbose=args.verbose >= 2)
+            self._num_records = None
 
-                # Create python-TF data bridge
-                assert(queue_capacity > min_after_dequeue)
-                self._data_bridge = data_provider.TFDataBridge(
-                    sess, batch_size,
-                    [input_shape, target_shape],
-                    [tf.float32, tf.float32],
-                    queue_capacity=queue_capacity,
-                    min_after_dequeue=min_after_dequeue,
-                    shuffle=shuffle,
-                    timeout=args.async_timeout,
-                    name="{}_data_queue".format(name),
-                    verbose=args.verbose)
+            tensor_dtypes = [tf.float32, tf.float32]
+            tensor_shapes = [input_shape, target_shape]
+            self._tf_pipeline = data_provider.TFInputPipeline(
+                self._record_provider_factory(self._hdf5_input_pipeline),
+                sess, coord, batch_size, tensor_shapes, tensor_dtypes,
+                queue_capacity=queue_capacity,
+                min_after_dequeue=min_after_dequeue,
+                shuffle=shuffle,
+                num_threads=num_threads,
+                gpu_device_name=tf_utils.gpu_device_name(),
+                timeout=args.async_timeout,
+                name="{}_tf_input_pipeline".format(name),
+                verbose=args.verbose >= 2)
 
-                self._queue_bridges = [tf_utils.QueueBridge(
-                    self._dequeue_record_factory(self._hdf5_input_pipeline),
-                    self._enqueue_record_with(self._data_bridge),
-                    coord, args.verbose) for _ in xrange(num_threads)]
-
-                # Retrieve tensors from data bridge
-                self._tensors = self._data_bridge.deque_batch()
-                self._input_batch, self._target_batch = self._tensors
-                # Generate GPU preload operations
-                self._gpu_preload_op, self._input_batch, self._target_batch = \
-                    self._gpu_preload_pipeline(self._input_batch, self._target_batch)
+            # Retrieve tensors from data bridge
+            self._input_batch, self._target_batch = self._tf_pipeline.tensors
 
         def start(self):
             self._hdf5_input_pipeline.start()
-            for bridge in self._queue_bridges:
-                bridge.start()
+            self._tf_pipeline.start()
 
         @property
         def num_records(self):
@@ -363,7 +366,7 @@ def run(args):
 
         @property
         def gpu_preload_op(self):
-            return self._gpu_preload_op
+            return self._tf_pipeline.gpu_preload_op
 
         @property
         def input_batch(self):
@@ -375,8 +378,7 @@ def run(args):
 
         @property
         def threads(self):
-            return [bridge.thread for bridge in self._queue_bridges] \
-                   + [self._hdf5_input_pipeline.thread]
+            return [self._hdf5_input_pipeline.thread] + self._tf_pipeline.threads
 
     with tf.device("/cpu:0"):
         train_input_pipeline = InputPipeline(
@@ -388,8 +390,14 @@ def run(args):
         print("# records in train dataset: {}".format(train_input_pipeline.num_records))
         print("# records in test dataset: {}".format(test_input_pipeline.num_records))
 
-    # Create model
+    # Read model config
+    if args.model_config is None:
+        model_config = get_model_config_from_cmdline(args)
+    else:
+        with file(args.model_config, "r") as config_file:
+            model_config = yaml.load(config_file)
 
+    # Create model
     if args.gpu_id < 0:
         device_name = '/cpu:0'
     else:
@@ -397,34 +405,25 @@ def run(args):
     with tf.device(device_name):
         # input_batch = tf.placeholder(tf.float32, shape=[None] + list(input_shape), name="in_input")
         with tf.variable_scope("model"):
-            model_config = args
-            train_model = models.Model(model_config, train_input_pipeline.input_batch,
-                                       target_shape=target_shape, is_training=True)
+            train_model = models.Model(model_config,
+                                       train_input_pipeline.input_batch,
+                                       train_input_pipeline.target_batch,
+                                       is_training=True,
+                                       verbose=args.verbose)
             variables = train_model.variables
 
         # Generate ground-truth inputs for computing loss function
         # train_target_batch = tf.placeholder(dtype=np.float32, shape=[None], name="target_batch")
 
-        loss_batch = tf.reduce_mean(
-            tf.square(train_model.output - train_input_pipeline.target_batch),
-            axis=-1, name="loss_batch")
-        loss = tf.reduce_mean(loss_batch, name="loss")
-        loss_min = tf.reduce_min(loss_batch, name="loss_min")
-        loss_max = tf.reduce_max(loss_batch, name="loss_max")
-
         # Generate output and loss function for testing (no dropout)
         with tf.variable_scope("model", reuse=True):
-            model_config = args
-            test_model = models.Model(model_config, test_input_pipeline.input_batch,
-                                      target_shape=target_shape, is_training=False)
-        test_loss_batch = tf.reduce_mean(
-            tf.square(test_model.output - test_input_pipeline.target_batch),
-            axis=-1, name="loss_batch")
-        test_loss = tf.reduce_mean(test_loss_batch, name="test_loss")
-        test_loss_min = tf.reduce_min(test_loss_batch, name="test_loss_min")
-        test_loss_max = tf.reduce_max(test_loss_batch, name="test_loss_max")
+            test_model = models.Model(model_config,
+                                      test_input_pipeline.input_batch,
+                                      test_input_pipeline.target_batch,
+                                      is_training=False,
+                                      verbose=args.verbose)
 
-        gradients = tf.gradients(loss, variables)
+        gradients = tf.gradients(train_model.loss, variables)
         gradients, _ = tf.clip_by_global_norm(gradients, max_grad_global_norm)
         # Create optimizer
         optimizer_class = tf_utils.get_optimizer_by_name(args.optimizer, tf.train.AdamOptimizer)
@@ -615,7 +614,7 @@ def run(args):
                     print("  Total batch # {}, total record # {}".format(total_batch_count, total_record_count))
 
                 # Create train op list
-                fetches = [train_op, loss, loss_min, loss_max]
+                fetches = [train_op, train_model.loss, train_model.loss_min, train_model.loss_max]
 
                 if do_summary:
                     summary_offset = len(fetches)
@@ -733,7 +732,7 @@ def run(args):
                 for record_count in xrange(0, test_input_pipeline.num_records, batch_size):
                     _, loss_v, loss_min_v, loss_max_v = sess.run([
                         test_input_pipeline.gpu_preload_op,
-                        test_loss, test_loss_min, test_loss_max])
+                        test_model.loss, test_model.loss_min, test_model.loss_max])
                     total_loss_value += loss_v
                     total_loss_min = np.minimum(loss_min_v, total_loss_min)
                     total_loss_max = np.maximum(loss_max_v, total_loss_max)
@@ -809,6 +808,7 @@ if __name__ == '__main__':
     parser.add_argument('--store-path', required=True, help='Store path.')
     parser.add_argument('--log-path', required=False, help='Log path.')
     parser.add_argument('--restore', action="store_true", help='Whether to restore existing model.')
+    parser.add_argument('--model-config', type=str, help='YAML description of model.')
 
     # Report and checkpoint saving
     parser.add_argument('--async_timeout', type=int, default=10 * 60)
