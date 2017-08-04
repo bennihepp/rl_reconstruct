@@ -7,265 +7,6 @@ import tensorflow.contrib.layers as tf_layers
 import tf_utils
 
 
-class Conv3DLayers(object):
-
-    def __init__(self,
-                 input,
-                 num_convs_per_block=2,
-                 initial_num_filters=8,
-                 filter_increase_per_block=8,
-                 filter_increase_within_block=0,
-                 maxpool_after_each_block=False,
-                 max_num_blocks=-1,
-                 max_output_grid_size=8,
-                 activation_fn=tf.nn.relu,
-                 add_bias=False,
-                 use_batch_norm=False,
-                 dropout_rate=0.2,
-                 is_training=True,
-                 create_summaries=None,
-                 variables_collections=None):
-        if use_batch_norm:
-            assert not add_bias
-
-        if not maxpool_after_each_block:
-            assert(max_num_blocks > 0)
-
-        if max_num_blocks <= 0:
-            assert(max_output_grid_size > 0)
-
-        scope = tf.get_variable_scope()
-
-        if create_summaries is None:
-            create_summaries = not scope.reuse
-
-        self.input = input
-
-        self.layers = []
-        self.summaries = []
-        self.summary_dict = {}
-
-        x = self.input
-        print("input:", x.shape)
-
-        num_filters = initial_num_filters
-        i = 0
-        done = False
-        while not done:
-            filter_size = [3, 3, 3]
-            stride = [1, 1, 1]
-            activations_list = []
-            for j in xrange(num_convs_per_block):
-                x = tf_utils.conv3d(x, num_filters, filter_size, stride,
-                                    activation_fn=activation_fn, add_bias=add_bias,
-                                    use_batch_norm=False,
-                                    name="conv3d_{}_{}".format(i, j),
-                                    collections=variables_collections)
-                activations_list.append(x)
-                if use_batch_norm:
-                    prev_x_shape = x.shape
-                    x = tf_layers.batch_norm(tf_utils.reshape_batch_3d_to_2d(x),
-                                             center=True, scale=True,
-                                             is_training=is_training,
-                                             fused=True,
-                                             scope="conv3d_{}_{}/bn".format(i, j),
-                                             variables_collections=variables_collections)
-                    x = tf.reshape(x, prev_x_shape)
-                # # Perform activation after batch norm
-                # x = activation_fn(x, name="activation")
-                if (j + 1) < num_convs_per_block:
-                    num_filters += filter_increase_within_block
-            do_maxpool = maxpool_after_each_block or (max_num_blocks > 0 and (i + 1) >= max_num_blocks)
-            if do_maxpool:
-                x_grid_size = int(x.shape[-2])
-                if x_grid_size > max_output_grid_size:
-                    ksize = [1, 2, 2, 2, 1]
-                    strides = [1, 2, 2, 2, 1]
-                    with tf.variable_scope("maxpool3d_{}".format(i)):
-                        x = tf.nn.max_pool3d(x, ksize, strides, padding="SAME")
-                elif max_output_grid_size > 0:
-                    done = True
-            print("x.shape:", i, x.shape)
-            # Make layer accessible from outside
-            with tf.variable_scope(scope, reuse=True) as scope2:
-                weights_list = []
-                biases_list = []
-                for j in xrange(num_convs_per_block):
-                    weights = tf.get_variable("conv3d_{}_{}/weights".format(i, j))
-                    if use_batch_norm:
-                        beta = tf.get_variable("conv3d_{}_{}/bn/beta".format(i, j))
-                        biases = tf.identity(beta, name="conv3d_{}_{}/biases".format(i, j))
-                    else:
-                        biases = tf.get_variable("conv3d_{}_{}/biases".format(i, j))
-                    weights_list.append(weights)
-                    biases_list.append(biases)
-                    layer = (weights, biases, activations_list[j])
-                    self.layers.append(layer)
-            with tf.variable_scope(scope) as scope2:
-                if create_summaries:
-                    # Create summaries for layer
-                    with tf.device("/cpu:0"):
-                        layer_summaries = []
-                        layer_summary_dict = {}
-                        for j in xrange(num_convs_per_block):
-                            layer_summaries += [
-                                tf.summary.histogram("conv3d_{}_{}/weights".format(i, j), weights_list[j]),
-                                tf.summary.histogram("conv3d_{}_{}/biases".format(i, j), biases_list[j]),
-                                tf.summary.histogram("conv3d_{}_{}/activations".format(i, j), activations_list[j]),
-                            ]
-                            layer_summary_dict.update({
-                                weights_list[j].name: weights_list[j],
-                                biases_list[j].name: biases_list[j],
-                                activations_list[j].name: activations_list[j],
-                            })
-                    self.summaries.extend(layer_summaries)
-                    self.summary_dict.update(layer_summary_dict)
-
-            num_filters += filter_increase_per_block
-
-            if max_num_blocks > 0 and (i + 1) >= max_num_blocks:
-                done = True
-            i += 1
-
-        self.output_wo_dropout = x
-
-        if dropout_rate > 0:
-            keep_prob = 1 - dropout_rate
-            x = tf.nn.dropout(x, keep_prob=keep_prob, name="dropout")
-            print("x.shape, dropout:", x.shape)
-
-        if create_summaries:
-            with tf.device("/cpu:0"):
-                dropout_summary = tf.summary.histogram("dropout_activations", x)
-            self.summaries.append(dropout_summary)
-            self.summary_dict.update({x.name: x})
-
-        self.output = x
-
-
-class RegressionOutputLayer(object):
-
-    def __init__(self,
-                 input,
-                 num_outputs,
-                 num_units=[1024],
-                 activation_fn=tf.nn.relu,
-                 use_batch_norm=False,
-                 is_training=True,
-                 create_summaries=None,
-                 variables_collections=None):
-        scope = tf.get_variable_scope()
-
-        if create_summaries is None:
-            create_summaries = not scope.reuse
-
-        self.input = input
-
-        self.layers = []
-        self.summaries = []
-        self.summary_dict = {}
-
-        x = self.input
-        # x = tf_utils.flatten(x)
-        # print("x.shape, flat:", x.shape)
-
-        for i in xrange(len(num_units)):
-            with tf.variable_scope('fc_{}'.format(i)) as scope2:
-                # if use_batch_norm:
-                #     bias_initializer = None
-                # else:
-                #     bias_initializer = tf.zeros_initializer()
-                # activations = tf_layers.fully_connected(x, num_units[i],
-                #                                         activation_fn=activation_fn,
-                #                                         weights_initializer=tf_layers.xavier_initializer(),
-                #                                         biases_initializer=bias_initializer)
-                add_bias = not use_batch_norm
-                activations = tf_utils.fully_connected(x, num_units[i],
-                                                       activation_fn=activation_fn, add_bias=add_bias,
-                                                       use_batch_norm=False,
-                                                       collections=variables_collections)
-                x = activations
-                if use_batch_norm:
-                    x = tf_utils.flatten_batch(x)
-                    x = tf_layers.batch_norm(x,
-                                             center=True, scale=True,
-                                             is_training=is_training,
-                                             fused=True,
-                                             scope="bn",
-                                             variables_collections=variables_collections)
-                # Perform activation after batch norm
-                # x = activation_fn(x, name="activation")
-                print("activations.shape, fc_{}:".format(i), activations.shape)
-            with tf.variable_scope(scope2, reuse=True):
-                # Make layer accessible from outside
-                weights = tf.get_variable('weights')
-                print("{}: {}".format(weights.name, weights.shape))
-                if use_batch_norm:
-                    beta = tf.get_variable("bn/beta")
-                    biases = tf.identity(beta, name="biases")
-                else:
-                    biases = tf.get_variable('biases')
-                print("{}: {}".format(biases.name, biases.shape))
-                layer = (weights, biases, activations)
-                self.layers.append(layer)
-            with tf.variable_scope(scope2):
-                if create_summaries:
-                    # Create summaries for layer
-                    with tf.device("/cpu:0"):
-                        layer_summaries = [
-                            tf.summary.histogram("weights".format(i), weights),
-                            tf.summary.histogram("biases".format(i), biases),
-                            tf.summary.histogram("activations".format(i), activations),
-                        ]
-                        layer_summary_dict = {
-                            weights.name: weights,
-                            biases.name: biases,
-                            activations.name: activations,
-                        }
-                    self.summaries.extend(layer_summaries)
-                    self.summary_dict.update(layer_summary_dict)
-
-        with tf.variable_scope('output') as scope2:
-            # activations = tf_layers.fully_connected(x, num_outputs,
-            #                                    activation_fn=None,
-            #                                    weights_initializer=tf_layers.xavier_initializer(),
-            #                                    biases_initializer=tf.zeros_initializer())
-            add_bias = True
-            x = tf_utils.fully_connected(x, num_outputs,
-                                         activation_fn=None, add_bias=add_bias,
-                                         use_batch_norm=False,
-                                         collections=variables_collections)
-            activations = x
-            print("activations.shape, fc_{}:".format(i), activations.shape)
-            print("output.shape:", activations.shape)
-            with tf.variable_scope(scope2, reuse=True):
-                # Make layer accessible from outside
-                weights = tf.get_variable('weights')
-                print("{}: {}".format(weights.name, weights.shape))
-                biases = tf.get_variable('biases')
-                print("{}: {}".format(biases.name, biases.shape))
-                layer = (weights, biases, activations)
-                self.layers.append(layer)
-            with tf.variable_scope(scope2):
-                if create_summaries:
-                    # Create summaries for layer
-                    with tf.device("/cpu:0"):
-                        layer_summaries = [
-                            tf.summary.histogram("weights", weights),
-                            tf.summary.histogram("biases", biases),
-                            tf.summary.histogram("activations", activations),
-                        ]
-                        layer_summary_dict = {
-                            weights.name: weights,
-                            biases.name: biases,
-                            activations.name: activations,
-                        }
-                    self.summaries.extend(layer_summaries)
-                    self.summary_dict.update(layer_summary_dict)
-
-        self.output = x
-
-
 class ModelModule(object):
 
     def __init__(self, config):
@@ -310,6 +51,11 @@ class ModelModule(object):
         assert(name not in self._summaries)
         self._summaries[name] = tensor
 
+    def _add_summaries(self, summary_dict):
+        for name, tensor in summary_dict.iteritems():
+            assert(name not in self._summaries)
+            self._summaries[name] = tensor
+
     def _set_output(self, output):
         self._output = output
 
@@ -336,6 +82,7 @@ class Conv3DModule(ModelModule):
                  config,
                  input,
                  is_training=True,
+                 variables_on_cpu=False,
                  variables_collections=None,
                  verbose=False):
         super(Conv3DModule, self).__init__(config)
@@ -378,6 +125,7 @@ class Conv3DModule(ModelModule):
                                     use_batch_norm=use_batch_norm,
                                     is_training=is_training,
                                     name="conv3d_{}_{}".format(i, j),
+                                    variables_on_cpu=variables_on_cpu,
                                     collections=variables_collections)
                 self._add_summary("conv3d_{}_{}/activations".format(i, j), x)
                 if (j + 1) < num_convs_per_block:
@@ -418,7 +166,7 @@ class Conv3DModule(ModelModule):
             keep_prob = 1 - dropout_rate
             x = tf.nn.dropout(x, keep_prob=keep_prob, name="dropout")
             if verbose:
-                print("x.shape, dropout:", x.shape)
+                print("  x.shape, dropout:", x.shape)
             self._add_summary("dropout_activations", x)
 
         self._set_output(x)
@@ -431,6 +179,7 @@ class RegressionModule(ModelModule):
                  input,
                  num_outputs,
                  is_training=True,
+                 variables_on_cpu=False,
                  variables_collections=None,
                  verbose=False):
         super(RegressionModule, self).__init__(config)
@@ -461,6 +210,7 @@ class RegressionModule(ModelModule):
                         batch_norm_after_activation=batch_norm_after_activation,
                         is_training=is_training,
                         padding="VALID",
+                        variables_on_cpu=variables_on_cpu,
                         collections=variables_collections)
                 else:
                     x = tf_utils.fully_connected(
@@ -470,21 +220,22 @@ class RegressionModule(ModelModule):
                         use_batch_norm=use_batch_norm,
                         batch_norm_after_activation=batch_norm_after_activation,
                         is_training=is_training,
+                        variables_on_cpu=variables_on_cpu,
                         collections=variables_collections)
                 if verbose:
-                    print("activations.shape, fc_{}:".format(i), x.shape)
+                    print("  activations.shape, fc_{}:".format(i), x.shape)
                 self._add_summary("fc_{}/activations".format(i), x)
             with tf.variable_scope(scope, reuse=True):
                 # Make layer accessible from outside
                 weights = tf.get_variable('weights')
                 if verbose:
-                    print("{}: {}".format(weights.name, weights.shape))
+                    print("  {}: {}".format(weights.name, weights.shape))
                 if use_batch_norm:
                     biases = tf.get_variable("bn/beta")
                 else:
                     biases = tf.get_variable('biases')
                 if verbose:
-                        print("{}: {}".format(biases.name, biases.shape))
+                        print("  {}: {}".format(biases.name, biases.shape))
                 # Add summaries for layer
                 self._add_summary("fc_{}/weights".format(i), weights)
                 self._add_summary("fc_{}/biases".format(i), biases)
@@ -500,6 +251,7 @@ class RegressionModule(ModelModule):
                                     use_batch_norm=False,
                                     is_training=is_training,
                                     padding="VALID",
+                                    variables_on_cpu=variables_on_cpu,
                                     collections=variables_collections)
                 if int(x.shape[1]) == 1 and int(x.shape[2]) == 1 and int(x.shape[3]) == 1:
                     # Remove 3D tensor dimensions if there is no spatial extent.
@@ -510,18 +262,19 @@ class RegressionModule(ModelModule):
                                              activation_fn=None, add_bias=True,
                                              use_batch_norm=False,
                                              is_training=is_training,
+                                             variables_on_cpu=variables_on_cpu,
                                              collections=variables_collections)
             self._add_summary("output/activations", x)
             if verbose:
-                print("output.shape:", x.shape)
+                print("  output.shape:", x.shape)
         with tf.variable_scope(scope, reuse=True):
             # Make layer accessible from outside
             weights = tf.get_variable('weights')
             if verbose:
-                print("{}: {}".format(weights.name, weights.shape))
+                print("  {}: {}".format(weights.name, weights.shape))
             biases = tf.get_variable('biases')
             if verbose:
-                print("{}: {}".format(biases.name, biases.shape))
+                print("  {}: {}".format(biases.name, biases.shape))
             # Add summaries for layer
             self._add_summary("output/weights", weights)
             self._add_summary("output/biases", biases)
@@ -533,7 +286,7 @@ class RegressionModule(ModelModule):
 class Model(ModelModule):
 
     def __init__(self, config, input_batch, target_batch, is_training=True,
-                 variables_collections=None, verbose=False):
+                 variables_on_cpu=False, variables_collections=None, verbose=False):
         super(Model, self).__init__(config)
 
         target_shape = [int(s) for s in target_batch.shape[1:]]
@@ -543,6 +296,7 @@ class Model(ModelModule):
             self._config["conv3d"],
             input_batch,
             is_training=is_training,
+            variables_on_cpu=variables_on_cpu,
             variables_collections=variables_collections,
             verbose=verbose)
         self._regression_module = RegressionModule(
@@ -550,6 +304,7 @@ class Model(ModelModule):
             self._conv3d_module.output,
             num_outputs,
             is_training=is_training,
+            variables_on_cpu=variables_on_cpu,
             variables_collections=variables_collections,
             verbose=verbose)
 
@@ -570,6 +325,12 @@ class Model(ModelModule):
         self._loss_min = tf.reduce_min(self._loss_batch, name="loss_min")
         self._loss_max = tf.reduce_max(self._loss_batch, name="loss_max")
 
+        self._gradients = tf.gradients(self._loss, self.variables)
+
+    @property
+    def gradients(self):
+        return self._gradients
+
     @property
     def modules(self):
         return self._modules
@@ -577,6 +338,74 @@ class Model(ModelModule):
     @property
     def loss_batch(self):
         return self._loss_batch
+
+    @property
+    def loss(self):
+        return self._loss
+
+    @property
+    def loss_min(self):
+        return self._loss_min
+
+    @property
+    def loss_max(self):
+        return self._loss_max
+
+
+class MultiGpuModelWrapper(ModelModule):
+
+    def __init__(self, models, verbose=False):
+        config = {}
+        super(MultiGpuModelWrapper, self).__init__(config)
+
+        self._models = models
+        self._add_variables(models[0].variables)
+        for name in models[0].summaries.keys():
+            concat_tensors = tf.concat([model.summaries[name] for model in models], axis=0)
+            self._add_summary(name, concat_tensors)
+
+        concat_output = tf.concat([model.output for model in models], axis=0)
+        self._set_output(concat_output)
+
+        sum_loss = tf.add_n([model.loss for model in models])
+        mean_loss = tf.multiply(sum_loss, 1.0 / len(models))
+        self._loss = mean_loss
+
+        loss_min_concat = tf.stack([model.loss_min for model in models], axis=0)
+        self._loss_min = tf.reduce_min(loss_min_concat, axis=0)
+
+        loss_max_concat = tf.stack([model.loss_max for model in models], axis=0)
+        self._loss_max = tf.reduce_max(loss_max_concat, axis=0)
+
+        self._gradients = self._mean_gradients([model.gradients for model in models], verbose)
+
+    def _mean_gradients(self, gradients_list, verbose=False):
+        mean_grads = []
+        for grads in zip(*gradients_list):
+            grad_list = []
+            for grad in grads:
+                if grad is not None:
+                    grad_list.append(grad)
+            if len(grad_list) > 0:
+                assert (len(grad_list) == len(grads))
+                grads = tf.stack(grad_list, axis=0, name="stacked_gradients")
+                if verbose:
+                    print("stacked grads:", grads.shape)
+                grad = tf.reduce_mean(grads, axis=0, name="mean_gradients")
+                if verbose:
+                    print("averaged grads:", grads.shape)
+            else:
+                grad = None
+            mean_grads.append(grad)
+        return mean_grads
+
+    @property
+    def gradients(self):
+        return self._gradients
+
+    @property
+    def modules(self):
+        return self._models[0].modules
 
     @property
     def loss(self):

@@ -36,15 +36,6 @@ class QueueBridge(object):
 
 class TFInputPipeline(object):
 
-    def _gpu_preload_pipeline(self, tensors, gpu_device_name="/gpu:0"):
-        with tf.device(gpu_device_name):
-            gpu_staging_area = tf_staging.StagingArea(
-                dtypes=[tensor.dtype for tensor in tensors],
-                shapes=[tensor.shape for tensor in tensors])
-        gpu_preload_op = gpu_staging_area.put(tensors)
-        gpu_tensors = gpu_staging_area.get()
-        return gpu_preload_op, gpu_tensors
-
     def __init__(self, tensor_provider_fn, sess, coord, batch_size,
                  tensor_shapes, tensor_dtypes,
                  queue_capacity, min_after_dequeue,
@@ -74,17 +65,10 @@ class TFInputPipeline(object):
 
             # Retrieve tensors from data bridge
             self._tensors = self._data_bridge.deque_batch()
-            # Generate GPU preload operations
-            self._gpu_preload_op, self._tensors = \
-                self._gpu_preload_pipeline(self._tensors, gpu_device_name)
 
     def start(self):
         for bridge in self._queue_bridges:
             bridge.start()
-
-    @property
-    def gpu_preload_op(self):
-        return self._gpu_preload_op
 
     @property
     def tensors(self):
@@ -93,6 +77,57 @@ class TFInputPipeline(object):
     @property
     def threads(self):
         return [bridge.thread for bridge in self._queue_bridges]
+
+
+class TFStagingArea(object):
+
+    def __init__(self, tensors, device_name=None):
+        if device_name is None:
+            self._staging_area = self._create_staging_area(tensors)
+        else:
+            with tf.device(device_name):
+                self._staging_area = self._create_staging_area(tensors)
+        self._preload_op = self._staging_area.put(tensors)
+        self._tensors = self._staging_area.get()
+
+    def _create_staging_area(self, tensors):
+        return tf_staging.StagingArea(
+            dtypes=[tensor.dtype for tensor in tensors],
+            shapes=[tensor.shape for tensor in tensors])
+
+    @property
+    def preload_op(self):
+        return self._preload_op
+
+    @property
+    def tensors(self):
+        return self._tensors
+
+
+class TFGpuInputPipeline(TFInputPipeline):
+
+    def _gpu_preload_pipeline(self, tensors, gpu_device_name="/gpu:0"):
+        with tf.device(gpu_device_name):
+            gpu_staging_area = tf_staging.StagingArea(
+                dtypes=[tensor.dtype for tensor in tensors],
+                shapes=[tensor.shape for tensor in tensors])
+        gpu_preload_op = gpu_staging_area.put(tensors)
+        gpu_tensors = gpu_staging_area.get()
+        return gpu_preload_op, gpu_tensors
+
+    def __init__(self, *args, **kwargs):
+        gpu_device_name = kwargs.get("gpu_device_name", tf_utils.gpu_device_name())
+        if "gpu_device_name" in kwargs:
+            del kwargs["gpu_device_name"]
+        super(TFGpuInputPipeline, self).__init__(*args, **kwargs)
+
+        # Generate GPU preload operations
+        self._gpu_preload_op, self._tensors = \
+            self._gpu_preload_pipeline(self._tensors, gpu_device_name)
+
+    @property
+    def gpu_preload_op(self):
+        return self._gpu_preload_op
 
 
 class FilenameQueueProvider(object):
