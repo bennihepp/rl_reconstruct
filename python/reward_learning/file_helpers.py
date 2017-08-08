@@ -4,7 +4,7 @@ import re
 DEFAULT_TFRECORDS_TEMPLATE = "data_{:04d}.tfrecords"
 DEFAULT_HDF5_TEMPLATE = "data_{:04d}.hdf5"
 
-DEFAULT_TFRECORDS_PATTERN = ".*\.tfrecords"
+DEFAULT_TFRECORDS_PATTERN = "data_\d+.tfrecords"
 DEFAULT_HDF5_PATTERN = "data_\d+.hdf5"
 DEFAULT_HDF5_STATS_FILENAME = "data_stats.hdf5"
 

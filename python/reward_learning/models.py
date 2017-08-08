@@ -9,8 +9,9 @@ import tf_utils
 
 class ModelModule(object):
 
-    def __init__(self, config):
+    def __init__(self, config, input_tensor):
         self._config = config
+        self._input = input_tensor
         self._variables = []
         self._summaries = {}
         self._scope = tf.get_variable_scope()
@@ -60,6 +61,14 @@ class ModelModule(object):
         self._output = output
 
     @property
+    def config(self):
+        return self._config
+
+    @property
+    def input(self):
+        return self._input
+
+    @property
     def variables(self):
         return self._variables
 
@@ -85,7 +94,7 @@ class Conv3DModule(ModelModule):
                  variables_on_cpu=False,
                  variables_collections=None,
                  verbose=False):
-        super(Conv3DModule, self).__init__(config)
+        super(Conv3DModule, self).__init__(config, input)
 
         num_convs_per_block = self._get_config("num_convs_per_block", 2)
         maxpool_after_each_block = self._get_config("maxpool_after_each_block", True)
@@ -97,6 +106,7 @@ class Conv3DModule(ModelModule):
         dropout_rate = self._get_config("dropout_rate", 0.3)
         add_bias = self._get_config("add_bias")
         use_batch_norm = self._get_config("use_batch_norm", True)
+        batch_norm_after_activation = self._get_config("batch_norm_after_activation", True)
         activation_fn = self._get_activation_fn(self._get_config("activation_fn"))
 
         if use_batch_norm:
@@ -120,13 +130,16 @@ class Conv3DModule(ModelModule):
             filter_size = [3, 3, 3]
             stride = [1, 1, 1]
             for j in xrange(num_convs_per_block):
-                x = tf_utils.conv3d(x, num_filters, filter_size, stride,
-                                    activation_fn=activation_fn, add_bias=add_bias,
-                                    use_batch_norm=use_batch_norm,
-                                    is_training=is_training,
-                                    name="conv3d_{}_{}".format(i, j),
-                                    variables_on_cpu=variables_on_cpu,
-                                    collections=variables_collections)
+                x = tf_utils.conv3d(
+                    x, num_filters, filter_size, stride,
+                    activation_fn=activation_fn,
+                    add_bias=add_bias,
+                    use_batch_norm=use_batch_norm,
+                    batch_norm_after_activation=batch_norm_after_activation,
+                    is_training=is_training,
+                    name="conv3d_{}_{}".format(i, j),
+                    variables_on_cpu=variables_on_cpu,
+                    collections=variables_collections)
                 self._add_summary("conv3d_{}_{}/activations".format(i, j), x)
                 if (j + 1) < num_convs_per_block:
                     num_filters += filter_increase_within_block
@@ -182,7 +195,7 @@ class RegressionModule(ModelModule):
                  variables_on_cpu=False,
                  variables_collections=None,
                  verbose=False):
-        super(RegressionModule, self).__init__(config)
+        super(RegressionModule, self).__init__(config, input)
 
         num_units = self._get_config_int_list("num_units")
         assert(num_units is not None)
@@ -283,14 +296,109 @@ class RegressionModule(ModelModule):
         self._set_output(x)
 
 
+class UpsamplingModule(ModelModule):
+
+    def __init__(self,
+                 config,
+                 input,
+                 target_shape,
+                 is_training=True,
+                 variables_on_cpu=False,
+                 variables_collections=None,
+                 verbose=False):
+        super(UpsamplingModule, self).__init__(config, input)
+
+        num_convs_per_block = self._get_config("num_convs_per_block", 1)
+        initial_num_filters = self._get_config("initial_num_filters", -1)
+        filter_decrease_per_block = self._get_config("filter_decrease_per_block", 8)
+        filter_decrease_within_block = self._get_config("filter_decrease_within_block", 0)
+        use_batch_norm = self._get_config("use_batch_norm", False)
+        batch_norm_after_activation = self._get_config("batch_norm_after_activation", True)
+        add_bias = not use_batch_norm
+        activation_fn = self._get_activation_fn(self._get_config("activation_fn", None))
+
+        if initial_num_filters <= 0:
+            initial_num_filters = int(input.shape[-1])
+
+        x = input
+        if verbose:
+            print("--- UpsamplingModule ---")
+            print("  input:", x.shape)
+
+        i = 0
+        num_filters = initial_num_filters
+        last_conv_transpose = False
+        while True:
+            x_grid_size = int(x.shape[-2])
+            if x_grid_size >= target_shape[-2]:
+                break
+            filter_size = [3, 3, 3]
+            for j in xrange(num_convs_per_block):
+                if (j + 1) < num_convs_per_block:
+                    num_filters -= filter_decrease_within_block
+                    output_shape = [int(s) for s in x.shape]
+                    output_shape[-1] = num_filters
+                    stride = [1, 1, 1]
+                else:
+                    output_shape = None
+                    new_output_x_size = int(x.shape[2]) * 2
+                    stride = [2, 2, 2]
+                    print("Last upsampling layer")
+                    if (j + 1) >= num_convs_per_block and new_output_x_size >= target_shape[-2]:
+                        last_conv_transpose = True
+                        num_filters = target_shape[-1]
+                x = tf_utils.conv3d_transpose(
+                    x,
+                    num_filters,
+                    output_shape=output_shape,
+                    filter_size=filter_size,
+                    stride=stride,
+                    activation_fn=activation_fn,
+                    add_bias=add_bias,
+                    use_batch_norm=use_batch_norm,
+                    batch_norm_after_activation=batch_norm_after_activation,
+                    is_training=is_training,
+                    name="conv3d_trans_{}_{}".format(i, j),
+                    variables_on_cpu=variables_on_cpu,
+                    collections=variables_collections)
+                if last_conv_transpose:
+                    for k in xrange(num_filters):
+                        self._add_summary("output_{}".format(k), x[..., slice(k, k+1)])
+                    self._add_summary("output_all", x)
+                else:
+                    self._add_summary("conv3d_trans_{}_{}/activations".format(i, j), x)
+                if verbose:
+                    print("  x.shape, {} {}: {}".format(i, j, x.shape))
+            # Make layer accessible from outside
+            with tf.variable_scope(tf.get_variable_scope(), reuse=True) as scope:
+                for j in xrange(num_convs_per_block):
+                    weights = tf.get_variable("conv3d_trans_{}_{}/weights".format(i, j))
+                    if use_batch_norm:
+                        biases = tf.get_variable("conv3d_trans_{}_{}/bn/beta".format(i, j))
+                    else:
+                        biases = tf.get_variable("conv3d_trans_{}_{}/biases".format(i, j))
+                    # Add summaries for layer
+                    self._add_summary("conv3d_trans_{}_{}/weights".format(i, j), weights)
+                    self._add_summary("conv3d_trans_{}_{}/biases".format(i, j), biases)
+
+                self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
+
+            num_filters -= filter_decrease_per_block
+            i += 1
+
+        self._set_output(x)
+
+
 class Model(ModelModule):
 
     def __init__(self, config, input_batch, target_batch, is_training=True,
                  variables_on_cpu=False, variables_collections=None, verbose=False):
-        super(Model, self).__init__(config)
+        super(Model, self).__init__(config, input_batch)
 
         target_shape = [int(s) for s in target_batch.shape[1:]]
         num_outputs = target_shape[-1]
+
+        self._modules = {}
 
         self._conv3d_module = Conv3DModule(
             self._config["conv3d"],
@@ -299,29 +407,59 @@ class Model(ModelModule):
             variables_on_cpu=variables_on_cpu,
             variables_collections=variables_collections,
             verbose=verbose)
-        self._regression_module = RegressionModule(
-            self._config["regression"],
-            self._conv3d_module.output,
-            num_outputs,
-            is_training=is_training,
-            variables_on_cpu=variables_on_cpu,
-            variables_collections=variables_collections,
-            verbose=verbose)
+        self._modules["conv3d"] = self._conv3d_module
 
-        self._set_output(self._regression_module.output)
-        self._add_variables(self._conv3d_module.variables)
-        self._add_variables(self._regression_module.variables)
-        for name, tensor in self._conv3d_module.summaries.iteritems():
-            self._add_summary("conv3d/" + name, tensor)
-        for name, tensor in self._regression_module.summaries.iteritems():
-            self._add_summary("regression/" + name, tensor)
-        self._modules = {"conv3d": self._conv3d_module,
-                         "regression": self._regression_module}
+        assert(("regression" in self._config) ^ ("upsampling" in self._config))
 
-        self._loss_batch = tf.reduce_mean(
-            tf.square(self.output - target_batch),
-            axis=-1, name="loss_batch")
+        if "regression" in self._config:
+            self._regression_module = RegressionModule(
+                self._config["regression"],
+                self._conv3d_module.output,
+                num_outputs,
+                is_training=is_training,
+                variables_on_cpu=variables_on_cpu,
+                variables_collections=variables_collections,
+                verbose=verbose)
+            self._modules["regression"] = self._regression_module
+            self._set_output(self._regression_module.output)
+            self._loss_batch = tf.reduce_mean(
+                tf.square(self.output - target_batch),
+                axis=-1, name="loss_batch")
+        else:
+            self._upsampling_module = UpsamplingModule(
+                self._config["upsampling"],
+                self._conv3d_module.output,
+                target_shape,
+                is_training=is_training,
+                variables_on_cpu=variables_on_cpu,
+                variables_collections=variables_collections,
+                verbose=verbose)
+            self._modules["upsampling"] = self._upsampling_module
+            self._set_output(self._upsampling_module.output)
+            # Reshape output and target to compute loss
+            if verbose:
+                print("Shape of output: {}".format(self.output.shape))
+                print("Shape of target_batch: {}".format(target_batch.shape))
+            output = tf.reshape(self.output, [int(self.output.shape[0]), -1])
+            reshaped_target_batch = tf.reshape(target_batch, [int(self.output.shape[0]), -1])
+            if verbose:
+                print("Reshaped output: {}".format(output.shape))
+                print("Reshaped target_batch: {}".format(reshaped_target_batch.shape))
+            self._loss_batch = tf.reduce_mean(
+                tf.square(output - reshaped_target_batch),
+                axis=-1, name="loss_batch")
+            if verbose:
+                print("Shape of batch loss: {}".format(self._loss_batch.shape))
+
+        for module_name, module in self._modules.iteritems():
+            self._add_variables(module.variables)
+            for tensor_name, tensor in module.summaries.iteritems():
+                self._add_summary(module_name + "/" + tensor_name, tensor)
+
         self._loss = tf.reduce_mean(self._loss_batch, name="loss")
+        self._loss = tf.reduce_mean(tf.square(self.output - target_batch), name="loss")
+        if verbose:
+            print("Shape of loss: {}".format(self._loss.shape))
         self._loss_min = tf.reduce_min(self._loss_batch, name="loss_min")
         self._loss_max = tf.reduce_max(self._loss_batch, name="loss_max")
 
@@ -355,8 +493,8 @@ class Model(ModelModule):
 class MultiGpuModelWrapper(ModelModule):
 
     def __init__(self, models, verbose=False):
-        config = {}
-        super(MultiGpuModelWrapper, self).__init__(config)
+        assert(len(models) > 0)
+        super(MultiGpuModelWrapper, self).__init__(models[0].config, models[0].input)
 
         self._models = models
         self._add_variables(models[0].variables)

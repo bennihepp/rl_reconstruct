@@ -13,9 +13,12 @@ Record = namedtuple("Record", ["obs_levels", "grid_3d", "rewards", "prob_rewards
 RecordBatch = namedtuple("RecordBatch", ["obs_levels", "grid_3ds", "rewards", "prob_rewards", "scores"])
 
 RecordV2 = namedtuple("RecordV2", ["obs_levels", "grid_3d", "rewards", "norm_rewards",
-                                 "prob_rewards", "norm_prob_rewards", "scores"])
+                                   "prob_rewards", "norm_prob_rewards", "scores"])
 RecordV2Batch = namedtuple("RecordV2Batch", ["obs_levels", "grid_3ds", "rewards", "norm_rewards",
-                                           "prob_rewards", "norm_prob_rewards", "scores"])
+                                             "prob_rewards", "norm_prob_rewards", "scores"])
+
+RecordV3 = namedtuple("RecordV3", ["obs_levels", "in_grid_3d", "out_grid_3d", "rewards", "scores"])
+RecordV3Batch = namedtuple("RecordV3Batch", ["obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores"])
 
 
 def write_hdf5_file(filename, numpy_dict):
@@ -68,18 +71,21 @@ def write_hdf5_records(filename, records):
 
 
 def read_hdf5_records(filename):
-    f = h5py.File(filename, "r")
-    obs_levels = f["grid_3ds"].attrs["obs_levels"]
-    obs_channels = f["grid_3ds"].attrs["obs_channels"]
-    rewards = np.array(f["rewards"])
-    prob_rewards = np.array(f["prob_rewards"])
-    scores = np.array(f["scores"])
-    grid_3ds = np.array(f["grid_3ds"])
-    assert(rewards.shape[0] == grid_3ds.shape[0])
-    assert(prob_rewards.shape[0] == grid_3ds.shape[0])
-    assert(scores.shape[0] == grid_3ds.shape[0])
-    assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
-    return RecordBatch(obs_levels, grid_3ds, rewards, prob_rewards, scores)
+    try:
+        f = h5py.File(filename, "r")
+        obs_levels = f["grid_3ds"].attrs["obs_levels"]
+        obs_channels = f["grid_3ds"].attrs["obs_channels"]
+        rewards = np.array(f["rewards"])
+        prob_rewards = np.array(f["prob_rewards"])
+        scores = np.array(f["scores"])
+        grid_3ds = np.array(f["grid_3ds"])
+        assert(rewards.shape[0] == grid_3ds.shape[0])
+        assert(prob_rewards.shape[0] == grid_3ds.shape[0])
+        assert(scores.shape[0] == grid_3ds.shape[0])
+        assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
+        return RecordBatch(obs_levels, grid_3ds, rewards, prob_rewards, scores)
+    except Exception, err:
+        print("ERROR: Exception raised when reading as HDF5 v1 file \"{}\": {}".format(filename, err))
 
 
 def write_hdf5_records_v2(filename, records):
@@ -111,24 +117,70 @@ def write_hdf5_records_v2(filename, records):
     f.close()
 
 
-def read_hdf5_records_v2(filename):
-    f = h5py.File(filename, "r")
-    obs_levels = np.array(f["grid_3ds"].attrs["obs_levels"])
-    obs_channels = np.array(f["grid_3ds"].attrs["obs_channels"])
-    rewards = np.array(f["rewards"])
-    norm_rewards = np.array(f["norm_rewards"])
-    prob_rewards = np.array(f["prob_rewards"])
-    norm_prob_rewards = np.array(f["norm_prob_rewards"])
-    scores = np.array(f["scores"])
-    grid_3ds = np.array(f["grid_3ds"])
+def write_hdf5_records_v3(filename, records):
+    f = h5py.File(filename, "w")
+    (obs_levels, in_grid_3d, out_grid_3d, rewards, scores) = records[0]
+    assert(in_grid_3d.shape[-1] == 2 * len(obs_levels))
+    assert(np.all(in_grid_3d.shape == out_grid_3d.shape))
+    rewards_shape = (len(records),) + rewards.shape
+    rewards_dset = f.create_dataset("rewards", rewards_shape, dtype='f')
+    scores_shape = (len(records),) + scores.shape
+    scores_dset = f.create_dataset("scores", scores_shape, dtype='f')
+    in_grid_3ds_shape = (len(records),) + in_grid_3d.shape
+    in_grid_3ds_dset = f.create_dataset("in_grid_3ds", in_grid_3ds_shape, dtype='f')
+    out_grid_3ds_shape = (len(records),) + out_grid_3d.shape
+    out_grid_3ds_dset = f.create_dataset("out_grid_3ds", out_grid_3ds_shape, dtype='f')
+    f.attrs["obs_levels"] = obs_levels
+    f.attrs["obs_channels"] = out_grid_3ds_shape[-1] / len(obs_levels)
+    for i, record in enumerate(records):
+        (obs_levels, in_grid_3d, out_grid_3d, rewards, scores) = record
+        in_grid_3ds_dset[i, ...] = in_grid_3d
+        out_grid_3ds_dset[i, ...] = out_grid_3d
+        rewards_dset[i, ...] = rewards
+        scores_dset[i, ...] = scores
     f.close()
-    assert(rewards.shape[0] == grid_3ds.shape[0])
-    assert(norm_rewards.shape[0] == grid_3ds.shape[0])
-    assert(prob_rewards.shape[0] == grid_3ds.shape[0])
-    assert(norm_prob_rewards.shape[0] == grid_3ds.shape[0])
-    assert(scores.shape[0] == grid_3ds.shape[0])
-    assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
-    return RecordV2Batch(obs_levels, grid_3ds, rewards, norm_rewards, prob_rewards, norm_prob_rewards, scores)
+
+
+def read_hdf5_records_v2(filename):
+    try:
+        f = h5py.File(filename, "r")
+        obs_levels = np.array(f["grid_3ds"].attrs["obs_levels"])
+        obs_channels = np.array(f["grid_3ds"].attrs["obs_channels"])
+        rewards = np.array(f["rewards"])
+        norm_rewards = np.array(f["norm_rewards"])
+        prob_rewards = np.array(f["prob_rewards"])
+        norm_prob_rewards = np.array(f["norm_prob_rewards"])
+        scores = np.array(f["scores"])
+        grid_3ds = np.array(f["grid_3ds"])
+        f.close()
+        assert(rewards.shape[0] == grid_3ds.shape[0])
+        assert(norm_rewards.shape[0] == grid_3ds.shape[0])
+        assert(prob_rewards.shape[0] == grid_3ds.shape[0])
+        assert(norm_prob_rewards.shape[0] == grid_3ds.shape[0])
+        assert(scores.shape[0] == grid_3ds.shape[0])
+        assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
+        return RecordV2Batch(obs_levels, grid_3ds, rewards, norm_rewards, prob_rewards, norm_prob_rewards, scores)
+    except Exception, err:
+        print("ERROR: Exception raised when reading as HDF5 v2 file \"{}\": {}".format(filename, err))
+
+
+def read_hdf5_records_v3(filename):
+    try:
+        f = h5py.File(filename, "r")
+        obs_levels = np.array(f.attrs["obs_levels"])
+        obs_channels = np.array(f.attrs["obs_channels"])
+        in_grid_3ds = np.array(f["in_grid_3ds"])
+        out_grid_3ds = np.array(f["out_grid_3ds"])
+        rewards = np.array(f["rewards"])
+        scores = np.array(f["scores"])
+        f.close()
+        assert(in_grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
+        assert(np.all(out_grid_3ds.shape == in_grid_3ds.shape))
+        assert(rewards.shape[0] == in_grid_3ds.shape[0])
+        assert(scores.shape[0] == in_grid_3ds.shape[0])
+        return RecordV3Batch(obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores)
+    except Exception, err:
+        print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
 
 
 def generate_single_records_from_batch_v2(record_batch):
@@ -144,6 +196,28 @@ def generate_single_records_from_batch_v2(record_batch):
         record = RecordV2(obs_levels, grid_3d, single_rewards, single_norm_rewards,
                           single_prob_rewards, single_norm_prob_rewards, single_scores)
         yield record
+
+
+def generate_single_records_from_hdf5_file_v2(filename):
+    record_batch = read_hdf5_records_v2(filename)
+    return generate_single_records_from_batch_v2(record_batch)
+
+
+def generate_single_records_from_batch_v3(record_batch):
+    obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores = record_batch
+    for i in xrange(rewards.shape[0]):
+        obs_levels = np.array(obs_levels)
+        in_grid_3d = in_grid_3ds[i, ...]
+        out_grid_3d = out_grid_3ds[i, ...]
+        single_rewards = rewards[i, ...]
+        single_scores = scores[i, ...]
+        record = RecordV3(obs_levels, in_grid_3d, out_grid_3d, single_rewards, single_scores)
+        yield record
+
+
+def generate_single_records_from_hdf5_file_v3(filename):
+    record_batch = read_hdf5_records_v3(filename)
+    return generate_single_records_from_batch_v3(record_batch)
 
 
 def read_hdf5_records_as_list(filename):
@@ -166,9 +240,20 @@ def read_hdf5_records_v2_as_list(filename):
     return records
 
 
+def read_hdf5_records_v3_as_list(filename):
+    record_batch = read_hdf5_records_v3(filename)
+    records = [record for record in generate_single_records_from_batch_v3(record_batch)]
+    return records
+
+
 def count_records_in_hdf5_file_v2(filename):
     record_batch = read_hdf5_records_v2(filename)
     return record_batch.grid_3ds.shape[0]
+
+
+def count_records_in_hdf5_file_v3(filename):
+    record_batch = read_hdf5_records_v3(filename)
+    return record_batch.in_grid_3ds.shape[0]
 
 
 class HDF5QueueReader(object):
@@ -211,11 +296,22 @@ class HDF5QueueReader(object):
         return self._thread
 
 
+HDF5_RECORD_VERSION_2 = 2
+HDF5_RECORD_VERSION_3 = 3
+HDF5_RECORD_VERSION_LATEST = HDF5_RECORD_VERSION_3
+
+
 class HDF5ReaderProcess(object):
 
-    def __init__(self, filename_queue, record_queue, verbose=False):
+    def __init__(self, filename_queue, record_queue, hdf5_record_version=HDF5_RECORD_VERSION_LATEST, verbose=False):
         self._filename_queue = filename_queue
         self._record_queue = record_queue
+        if hdf5_record_version == HDF5_RECORD_VERSION_2:
+            self._record_generator_factory = generate_single_records_from_hdf5_file_v2
+        elif hdf5_record_version == HDF5_RECORD_VERSION_3:
+            self._record_generator_factory = generate_single_records_from_hdf5_file_v3
+        else:
+            raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
         self._process = None
         self._verbose = verbose
         self._should_stop = True
@@ -226,8 +322,8 @@ class HDF5ReaderProcess(object):
             filename = self._filename_queue.get(block=True)
             if filename is None:
                 break
-            record_batch = read_hdf5_records_v2(filename)
-            for record in generate_single_records_from_batch_v2(record_batch):
+            record_generator = self._record_generator_factory(filename)
+            for record in record_generator:
                 self._record_queue.put(record, block=True)
                 record_count += 1
             if self._verbose:
@@ -258,11 +354,12 @@ class HDF5ReaderProcess(object):
 
 class HDF5ReaderProcessCoordinator(object):
 
-    def __init__(self, filenames, coord, shuffle, timeout=60, num_processes=1,
-                 record_queue_capacity=1024, verbose=False):
+    def __init__(self, filenames, coord, shuffle, hdf5_record_version=HDF5_RECORD_VERSION_LATEST,
+                 timeout=60, num_processes=1, record_queue_capacity=1024, verbose=False):
         self._filenames = list(filenames)
         self._coord = coord
         self._shuffle = shuffle
+        self._hdf5_record_version = hdf5_record_version
         self._timeout = timeout
         self._num_processes = num_processes
         self._record_queue_capacity = record_queue_capacity
@@ -276,7 +373,7 @@ class HDF5ReaderProcessCoordinator(object):
         self._record_queue = multiprocessing.Queue(maxsize=self._record_queue_capacity)
         self._filename_queue = multiprocessing.Queue(maxsize=2 * len(self._filenames))
         self._reader_processes = [
-            HDF5ReaderProcess(self._filename_queue, self._record_queue, self._verbose)
+            HDF5ReaderProcess(self._filename_queue, self._record_queue, self._hdf5_record_version, self._verbose)
             for _ in xrange(self._num_processes)]
 
     def _start_readers(self):
@@ -338,7 +435,13 @@ class HDF5ReaderProcessCoordinator(object):
         p = multiprocessing.Pool(self._num_processes)
         # TODO: This blocks on Ctrl-C
         try:
-            record_counts_async = p.map_async(count_records_in_hdf5_file_v2, self._filenames, chunksize=1)
+            if self._hdf5_record_version == HDF5_RECORD_VERSION_2:
+                count_record_fn = count_records_in_hdf5_file_v2
+            elif self._hdf5_record_version == HDF5_RECORD_VERSION_3:
+                count_record_fn = count_records_in_hdf5_file_v3
+            else:
+                raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
+            record_counts_async = p.map_async(count_record_fn, self._filenames, chunksize=1)
             # Workaround to enable KeyboardInterrupt (with p.map() or record_counts_async.get() it won't be received)
             record_counts = record_counts_async.get(np.iinfo(np.int32).max)
             record_count = np.sum(record_counts)

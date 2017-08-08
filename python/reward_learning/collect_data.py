@@ -12,6 +12,18 @@ import RLrecon.environments.environment as RLenvironment
 import matplotlib.pyplot as plt
 
 
+def get_environment_class_by_name(environment_name):
+    if environment_name == "HorizontalEnvironment":
+        environment_class = RLenvironment.HorizontalEnvironment
+    elif environment_name == "SimpleV0Environment":
+        environment_class = RLenvironment.SimpleV0Environment
+    elif environment_name == "SimpleV2Environment":
+        environment_class = RLenvironment.SimpleV2Environment
+    else:
+        raise NotImplementedError("Unknown environment class: {}".format(environment_name))
+    return environment_class
+
+
 def run(args):
     output_path = args.output_path
     if not os.path.isdir(output_path):
@@ -31,9 +43,7 @@ def run(args):
     obs_sizes_y = obs_sizes_x
     obs_sizes_z = obs_sizes_x
 
-    # environment_class = RLenvironment.HorizontalEnvironment
-    environment_class = RLenvironment.SimpleV0Environment
-    # environment_class = RLenvironment.SimpleV2Environment
+    environment_class = get_environment_class_by_name(args.environment)
     client_id = args.client_id
     environment = env_factory.create_environment(environment_class, client_id)
 
@@ -221,9 +231,10 @@ def run(args):
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=None)
     # parser.add_argument('-v', '--verbose', action='count', dest='verbosity', default=0, help='Set verbosity.')
-    parser.add_argument('--dry-run', action='store_true', help='Do not save anything')
-    parser.add_argument('--output-path', help='Output path')
-    parser.add_argument('--num-records', default=10000, type=int, help='Total records to collect')
+    parser.add_argument('--dry-run', action='store_true', help="Do not save anything")
+    parser.add_argument('--output-path', type=str, help="Output path")
+    parser.add_argument('--environment', type=str, help="Environment name")
+    parser.add_argument('--num-records', default=10000, type=int, help="Total records to collect")
     parser.add_argument('--client-id', default=0, type=int)
 
     args = parser.parse_args()

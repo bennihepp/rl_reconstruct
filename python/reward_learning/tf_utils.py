@@ -348,6 +348,75 @@ def conv3d(x, num_filters, filter_size=(3, 3, 3), stride=(1, 1, 1),
         return conv_out
 
 
+def conv3d_transpose(x, num_filters, output_shape=None, filter_size=(3, 3, 3), stride=(1, 1, 1),
+                     activation_fn=tf.nn.relu, add_bias=False, use_batch_norm=True,
+                     batch_norm_after_activation=False, is_training=True,
+                     weights_initializer=None, padding="SAME",
+                     dtype=tf.float32, name=None, variables_on_cpu=False, collections=None):
+    if use_batch_norm:
+        assert(not add_bias)
+
+    # num_filters = int(x.get_shape()[4])
+
+    if output_shape is None:
+        input_shape = x.get_shape().as_list()
+        output_shape = tf.TensorShape([int(input_shape[0]),
+                                       2 * input_shape[1], 2 * input_shape[2], 2 * input_shape[3], num_filters])
+
+    if name is None:
+        name = tf.get_variable_scope()
+    with tf.variable_scope(name):
+        strides = [1, stride[0], stride[1], stride[2], 1]
+        filter_shape = [filter_size[0], filter_size[1], filter_size[2], num_filters, int(x.get_shape()[4])]
+        # filter_shape = [filter_size[0], filter_size[1], filter_size[2], int(x.get_shape()[4]), num_filters]
+
+        if weights_initializer is None:
+            if activation_fn == tf.nn.relu:
+                weights_initializer = relu_normal_weights_initializer()
+            else:
+                weights_initializer = xavier_uniform_weights_initializer()
+
+        w = get_tf_variable("weights", filter_shape, dtype, initializer=weights_initializer,
+                            collections=collections, variable_on_cpu=variables_on_cpu)
+        print("{}: {}".format(w.name, w.shape))
+        print("  output_shape:", output_shape)
+        print("  num_filters:", num_filters)
+        print("  filter_shape:", filter_shape)
+        print("  x.shape:", x.shape)
+        conv_trans_out = tf.nn.conv3d_transpose(x, w, output_shape, strides, padding, name="conv3d_trans_out")
+
+        if add_bias:
+            b = get_tf_variable("biases", [1, 1, 1, 1, num_filters], initializer=tf.zeros_initializer(),
+                                collections=collections, variable_on_cpu=variables_on_cpu)
+            print("{}: {}".format(b.name, b.shape))
+            conv_trans_out = tf.add(conv_trans_out, b, name="linear_out")
+        else:
+            # Generate tensor with zero elements (so we can retrieve the biases anyway)
+            b = get_tf_variable("biases", [1, 1, 1, 1, 0], initializer=tf.zeros_initializer(),
+                                collections=collections, variable_on_cpu=variables_on_cpu)
+            print("{}: {}".format(b.name, b.shape))
+
+        if use_batch_norm and not batch_norm_after_activation:
+            conv_trans_out = batch_norm_on_3d(conv_trans_out,
+                                        center=True, scale=True,
+                                        is_training=is_training,
+                                        scope="bn",
+                                        variables_collections=collections,
+                                        variables_on_cpu=variables_on_cpu)
+
+        if activation_fn is not None:
+            conv_trans_out = activation_fn(conv_trans_out, name="activation")
+
+        if use_batch_norm and batch_norm_after_activation:
+            conv_trans_out = batch_norm_on_3d(conv_trans_out,
+                                        center=True, scale=True,
+                                        is_training=is_training,
+                                        scope="bn",
+                                        variables_collections=collections)
+
+        return conv_trans_out
+
+
 def fully_connected(x, num_units, activation_fn=tf.nn.relu,
                     add_bias=False, use_batch_norm=True, batch_norm_after_activation=False, is_training=True,
                     weights_initializer=None, dtype=tf.float32, name=None, variables_on_cpu=False, collections=None):
