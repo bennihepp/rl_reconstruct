@@ -7,6 +7,35 @@ import tensorflow.contrib.layers as tf_layers
 import tf_utils
 
 
+def get_default_model_config():
+    config = {}
+    config["modules"] = ["conv3d", "regression"]
+    config["conv3d"] = {}
+    config["conv3d"]["num_convs_per_block"] = 8
+    config["conv3d"]["initial_num_filters"] = 8
+    config["conv3d"]["filter_increase_per_block"] = 0
+    config["conv3d"]["filter_increase_within_block"] = 6
+    config["conv3d"]["maxpool_after_each_block"] = False
+    config["conv3d"]["max_num_blocks"] = -1
+    config["conv3d"]["max_output_grid_size"] = 8
+    config["conv3d"]["dropout_rate"] = 0.5
+    config["conv3d"]["add_bias"] = False
+    config["conv3d"]["use_batch_norm"] = False
+    config["conv3d"]["activation_fn"] = "relu"
+    config["regression"] = {}
+    config["regression"]["use_batch_norm"] = False
+    config["regression"]["num_units"] = "1024"
+    config["regression"]["activation_fn"] = "relu"
+    config["upsampling"] = {}
+    config["upsampling"]["num_convs_per_block"] = 4
+    config["upsampling"]["add_bias"] = True
+    config["upsampling"]["use_batch_norm"] = False
+    config["upsampling"]["filter_decrease_per_block"] = 8
+    config["upsampling"]["filter_decrease_within_block"] = 16
+    config["upsampling"]["activation_fn"] = "relu"
+    return config
+
+
 class ModelModule(object):
 
     def __init__(self, config, input_tensor):

@@ -18,116 +18,10 @@ import tensorflow.contrib.layers as tf_layers
 import tensorflow.contrib.memory_stats as tf_memory_stats
 import tf_utils
 import data_provider
+import input_pipeline
 from attribute_dict import AttributeDict
 from tensorflow.python.client import timeline
 from RLrecon.utils import Timer
-
-
-def compute_dataset_stats(batches_generator):
-    data_size = 0
-    sums = None
-    sq_sums = None
-    for batches in batches_generator:
-        if sums is None:
-            sums = [np.zeros(batch.shape[1:]) for batch in batches]
-            sq_sums = [np.zeros(batch.shape[1:]) for batch in batches]
-        for i, batch in enumerate(batches):
-            sums[i] += np.sum(batch, axis=0)
-            sq_sums[i] += np.sum(np.square(batch), axis=0)
-            assert(batch.shape[0] == batches[0].shape[0])
-        data_size += batches[0].shape[0]
-    means = []
-    stddevs = []
-    for i in xrange(len(sums)):
-        mean = sums[i] / data_size
-        stddev = (sq_sums[i] - np.square(sums[i]) / data_size) / (data_size - 1)
-        stddev[np.abs(stddev) < 1e-5] = 1
-        stddev = np.sqrt(stddev)
-        assert(np.all(np.isfinite(mean)))
-        assert(np.all(np.isfinite(stddev)))
-        means.append(mean)
-        stddevs.append(stddev)
-    return data_size, zip(means, stddevs)
-
-
-def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_scores=True):
-    assert(len(filenames) > 0)
-
-    def batches_generator(filenames, field_names):
-        for filename in filenames:
-            batches = []
-            record_batch = data_record.read_hdf5_records_v3(filename)
-            for name in field_names:
-                batch = getattr(record_batch, name)
-                batches.append(batch)
-            yield batches
-    data_size, stats = compute_dataset_stats(batches_generator(filenames, field_names))
-    if compute_z_scores:
-
-        def z_score_batches_generator(filenames, field_names):
-            for filename in filenames:
-                batches = []
-                record_batch = data_record.read_hdf5_records_v3(filename)
-                for i, name in enumerate(field_names):
-                    batch = getattr(record_batch, name)
-                    mean = stats[i][0]
-                    stddev = stats[i][1]
-                    z_score = (batch - mean[np.newaxis, ...]) / stddev[np.newaxis, ...]
-                    batches.append(z_score)
-                yield batches
-        _, z_score_stats = compute_dataset_stats(z_score_batches_generator(filenames, field_names))
-        all_stats = []
-        for i in xrange(len(stats)):
-            all_stats.append(stats[i])
-            all_stats.append(z_score_stats[i])
-        stats = all_stats
-    return data_size, stats
-
-
-def get_input_normalization(filenames, input_stats_filename):
-    # Mean and stddev of input for normalization
-    if os.path.isfile(input_stats_filename):
-        numpy_dict = data_record.read_hdf5_file_to_numpy_dict(input_stats_filename)
-        all_data_size = int(numpy_dict["all_data_size"])
-        mean_in_grid_3d_np = numpy_dict["mean_in_grid_3d"]
-        stddev_in_grid_3d_np = numpy_dict["stddev_in_grid_3d"]
-        mean_z_score = numpy_dict["mean_z_score"]
-        stddev_z_score = numpy_dict["stddev_z_score"]
-        tmp_record_batch = data_record.read_hdf5_records_v3(filenames[0])
-        assert(np.all(numpy_dict["mean_in_grid_3d"].shape == tmp_record_batch.in_grid_3ds.shape[1:]))
-    else:
-        print("Computing data statistics")
-        all_data_size, ((mean_in_grid_3d_np, stddev_in_grid_3d_np), (mean_z_score, stddev_z_score)) \
-            = compute_dataset_stats_from_hdf5_files_v3(filenames, ["in_grid_3ds"], compute_z_scores=True)
-        if not np.all(np.abs(mean_z_score) < 1e-2):
-            print("mean_z_score")
-            print(mean_z_score)
-            print(mean_z_score[np.abs(mean_z_score - 1) >= 1e-2])
-            print(np.sum(np.abs(mean_z_score - 1) >= 1e-2))
-        assert(np.all(np.abs(mean_z_score) < 1e-3))
-        if not np.all(np.abs(stddev_z_score - 1) < 1e-2):
-            print("stddev_z_score")
-            print(stddev_z_score)
-            print(stddev_z_score[np.abs(stddev_z_score - 1) >= 1e-2])
-            print(stddev_z_score[np.abs(stddev_z_score - 1) >= 1e-2] < 1e-2)
-            print(np.sum(np.abs(stddev_z_score - 1) >= 1e-2))
-            print(np.max(np.abs(stddev_z_score - 1)))
-        assert(np.all(np.abs(stddev_z_score - 1) < 1e-2))
-        data_record.write_hdf5_file(input_stats_filename, {
-            "all_data_size": np.array(all_data_size),
-            "mean_in_grid_3d": mean_in_grid_3d_np,
-            "stddev_in_grid_3d": stddev_in_grid_3d_np,
-            "mean_z_score": mean_z_score,
-            "stddev_z_score": stddev_z_score,
-        })
-    print("Data statistics:")
-    print("  Mean of in_grid_3d:", np.mean(mean_in_grid_3d_np.flatten()))
-    print("  Stddev of in_grid_3d:", np.mean(stddev_in_grid_3d_np.flatten()))
-    print("  Mean of z_score:", np.mean(mean_z_score.flatten()))
-    print("  Stddev of z_score:", np.mean(stddev_z_score.flatten()))
-    print("  Size of full dataset:", all_data_size)
-
-    return mean_in_grid_3d_np, stddev_in_grid_3d_np
 
 
 def save_model(sess, saver, store_path, global_step_tf, max_trials, retry_save_wait_time=5, verbose=False):
@@ -207,35 +101,6 @@ def update_config_from_cmdline(config, args):
     config["data"]["subvolume_slice_z"] = args.subvolume_slice_z
     config["data"]["normalize_input"] = args.normalize_input
     config["data"]["normalize_target"] = args.normalize_target
-    return config
-
-
-def get_default_model_config():
-    config = {}
-    config["modules"] = ["conv3d", "regression"]
-    config["conv3d"] = {}
-    config["conv3d"]["num_convs_per_block"] = 8
-    config["conv3d"]["initial_num_filters"] = 8
-    config["conv3d"]["filter_increase_per_block"] = 0
-    config["conv3d"]["filter_increase_within_block"] = 6
-    config["conv3d"]["maxpool_after_each_block"] = False
-    config["conv3d"]["max_num_blocks"] = -1
-    config["conv3d"]["max_output_grid_size"] = 8
-    config["conv3d"]["dropout_rate"] = 0.5
-    config["conv3d"]["add_bias"] = False
-    config["conv3d"]["use_batch_norm"] = False
-    config["conv3d"]["activation_fn"] = "relu"
-    config["regression"] = {}
-    config["regression"]["use_batch_norm"] = False
-    config["regression"]["num_units"] = "1024"
-    config["regression"]["activation_fn"] = "relu"
-    config["upsampling"] = {}
-    config["upsampling"]["num_convs_per_block"] = 4
-    config["upsampling"]["add_bias"] = True
-    config["upsampling"]["use_batch_norm"] = False
-    config["upsampling"]["filter_decrease_per_block"] = 8
-    config["upsampling"]["filter_decrease_within_block"] = 16
-    config["upsampling"]["activation_fn"] = "relu"
     return config
 
 
@@ -321,228 +186,13 @@ def run(args):
     else:
         print("Using all test dataset files")
 
-    # Input configuration, i.e. which slices and channels from the 3D grids to use.
-    # First read any of the data records
-    tmp_record_batch = data_record.read_hdf5_records_v3(train_filenames[0])
-    assert(tmp_record_batch.in_grid_3ds.shape[0] > 0)
-    assert(np.all(tmp_record_batch.in_grid_3ds.shape == tmp_record_batch.out_grid_3ds.shape))
-    tmp_records = list(data_record.generate_single_records_from_batch_v3(tmp_record_batch))
-    tmp_record = tmp_records[0]
-    print("Observation levels in data record: {}".format(tmp_record.obs_levels))
-    raw_in_grid_3d = tmp_record.in_grid_3d
-    # Determine subvolume slices
-    if cfg.data.subvolume_slice_x is None:
-        subvolume_slice_x = slice(0, raw_in_grid_3d.shape[0])
-    else:
-        subvolume_slice_x = slice(*[int(x) for x in cfg.data.subvolume_slice_x.split(',')])
-    if cfg.data.subvolume_slice_y is None:
-        subvolume_slice_y = slice(0, raw_in_grid_3d.shape[1])
-    else:
-        subvolume_slice_y = slice(*[int(x) for x in cfg.data.subvolume_slice_y.split(',')])
-    if cfg.data.subvolume_slice_z is None:
-        subvolume_slice_z = slice(0, raw_in_grid_3d.shape[2])
-    else:
-        subvolume_slice_z = slice(*[int(x) for x in cfg.data.subvolume_slice_z.split(',')])
-    # Print used subvolume slices and channels
-    print("Subvolume slice x: {}".format(subvolume_slice_x))
-    print("subvolume slice y: {}".format(subvolume_slice_y))
-    print("subvolume slice z: {}".format(subvolume_slice_z))
-    print("Input id: {}".format(cfg.data.target_id))
-    print("Target id: {}".format(cfg.data.target_id))
+    if not cfg.data.input_stats_filename:
+        cfg.data.input_stats_filename = os.path.join(args.data_path, file_helpers.DEFAULT_HDF5_STATS_FILENAME)
+    input_shape, get_input_from_record, target_shape, get_target_from_record = \
+        input_pipeline.get_input_and_target_from_record_functions(cfg.data, all_filenames, args.verbose)
 
-    # Retrieval functions for input from data records
-    if cfg.data.input_id == "in_grid_3d":
-        # Determine channels to use
-        if cfg.data.obs_levels_to_use is None:
-            in_grid_3d_channels = range(raw_in_grid_3d.shape[-1])
-        else:
-            obs_levels_to_use = [int(x) for x in cfg.data.obs_levels_to_use.split(',')]
-            in_grid_3d_channels = []
-            for level in obs_levels_to_use:
-                in_grid_3d_channels.append(2 * level)
-                in_grid_3d_channels.append(2 * level + 1)
-        print("Channels of in_grid_3d: {}".format(in_grid_3d_channels))
-        def get_input_from_record(record):
-            return record.in_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_grid_3d_channels]
-    elif cfg.data.input_id.startswith("in_grid_3d["):
-        in_channels = cfg.data.input_id[len("in_grid_3d"):]
-        in_channels = [int(x) for x in in_channels.strip("[]").split(",")]
-        def get_input_from_record(record):
-            return record.in_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_channels]
-    elif cfg.data.input_id.startswith("rand["):
-        shape = cfg.data.input_id[len("rand"):]
-        shape = [int(x) for x in shape.strip("[]").split(",")]
-        def get_input_from_record(record):
-            return np.random.rand(*shape)
-    elif cfg.data.input_id.startswith("randn["):
-        shape = cfg.data.input_id[len("randn"):]
-        shape = [int(x) for x in shape.strip("[]").split(",")]
-        def get_input_from_record(record):
-            return np.random.randn(*shape)
-    else:
-        raise NotImplementedError("Unknown input name: {}".format(cfg.data.input_id))
-
-    if cfg.data.normalize_input:
-        input_stats_filename = cfg.data.input_stats_filename
-        if not cfg.data.input_stats_filename:
-            input_stats_filename = os.path.join(args.data_path, file_helpers.DEFAULT_HDF5_STATS_FILENAME)
-        mean_in_grid_3d_np, stddev_in_grid_3d_np = get_input_normalization(all_filenames, input_stats_filename)
-        mean_record = data_record.RecordV3(None, mean_in_grid_3d_np, None, None, None)
-        mean_input_np = get_input_from_record(mean_record)
-        stddev_record = data_record.RecordV3(None, stddev_in_grid_3d_np, None, None, None)
-        stddev_input_np = get_input_from_record(stddev_record)
-        print("  mean_input_np.shape", mean_input_np.shape)
-        print("  stddev_input_np.shape", stddev_input_np.shape)
-
-        get_unnormalized_input_from_record = get_input_from_record
-
-        # Retrieval functions for normalized input
-        def get_input_from_record(record):
-            single_input = get_unnormalized_input_from_record(record)
-            if cfg.data.normalize_input:
-                single_input = (single_input - mean_input_np) / stddev_input_np
-            return single_input
-
-    # Retrieval functions for target from data records
-    if cfg.data.target_id == "reward":
-        def get_target_from_record(record):
-            return record.rewards[..., 0].reshape((1,))
-    elif cfg.data.target_id == "norm_reward":
-        def get_target_from_record(record):
-            return record.rewards[..., 1].reshape((1,))
-    elif cfg.data.target_id == "prob_reward":
-        def get_target_from_record(record):
-            return record.rewards[..., 2].reshape((1,))
-    elif cfg.data.target_id == "norm_prob_reward":
-        def get_target_from_record(record):
-            return record.rewards[..., 3].reshape((1,))
-    elif cfg.data.target_id == "score":
-        def get_target_from_record(record):
-            return record.scores[..., 0].reshape((1,))
-    elif cfg.data.target_id == "norm_score":
-        def get_target_from_record(record):
-            return record.scores[..., 1].reshape((1,))
-    elif cfg.data.target_id == "prob_score":
-        def get_target_from_record(record):
-            return record.scores[..., 2].reshape((1,))
-    elif cfg.data.target_id == "norm_prob_score":
-        def get_target_from_record(record):
-            return record.scores[..., 3].reshape((1,))
-    elif cfg.data.target_id == "mean_occupancy":
-        def get_target_from_record(record):
-            return np.mean(record.in_grid_3d[..., 0::2]).reshape((1,))
-    elif cfg.data.target_id == "sum_occupancy":
-        def get_target_from_record(record):
-            return np.sum(record.in_grid_3d[..., 0::2]).reshape((1,))
-    elif cfg.data.target_id == "mean_observation":
-        def get_target_from_record(record):
-            return np.mean(record.in_grid_3d[..., 1::2]).reshape((1,))
-    elif cfg.data.target_id == "sum_observation":
-        def get_target_from_record(record):
-            return np.sum(record.in_grid_3d[..., 1::2]).reshape((1,))
-    elif cfg.data.target_id == "in_grid_3d":
-        assert(cfg.data.input_id == "in_grid_3d")
-        def get_target_from_record(record):
-            return record.in_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_grid_3d_channels]
-    elif cfg.data.target_id == "norm_in_grid_3d":
-        assert(cfg.data.input_id == "in_grid_3d")
-        def get_target_from_record(record):
-            single_grid_3d = record.in_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_grid_3d_channels]
-            if cfg.data.normalize_input:
-                single_grid_3d = (single_grid_3d - mean_input_np) / stddev_input_np
-            return single_grid_3d
-    elif cfg.data.target_id == "out_grid_3d":
-        assert(cfg.data.input_id == "in_grid_3d")
-        def get_target_from_record(record):
-            return record.out_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_grid_3d_channels]
-    elif cfg.data.target_id == "norm_out_grid_3d":
-        assert(cfg.data.input_id == "in_grid_3d")
-        def get_target_from_record(record):
-            single_grid_3d = record.out_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, in_grid_3d_channels]
-            if cfg.data.normalize_input:
-                single_grid_3d = (single_grid_3d - mean_input_np) / stddev_input_np
-            return single_grid_3d
-    elif cfg.data.target_id.startswith("out_grid_3d["):
-        out_channels = cfg.data.target_id[len("out_grid_3d"):]
-        out_channels = [int(x) for x in out_channels.strip("[]").split(",")]
-        def get_target_from_record(record):
-            return record.out_grid_3d[subvolume_slice_x, subvolume_slice_y, subvolume_slice_z, out_channels]
-    elif cfg.data.target_id == "input":
-        def get_target_from_record(record):
-            return get_input_from_record(record)
-    elif cfg.data.target_id.startswith("rand["):
-        shape = cfg.data.target_id[len("rand"):]
-        shape = [int(x) for x in shape.strip("[]").split(",")]
-        def get_target_from_record(record):
-            return np.random.rand(*shape)
-    elif cfg.data.target_id.startswith("randn["):
-        shape = cfg.data.target_id[len("randn"):]
-        shape = [int(x) for x in shape.strip("[]").split(",")]
-        def get_target_from_record(record):
-            return np.random.randn(*shape)
-    else:
-        raise NotImplementedError("Unknown target name: {}".format(cfg.data.target_id))
-
-    if cfg.data.normalize_target:
-        print("Computing target statistics. This can take a while.")
-
-        def target_batches_generator(filenames):
-            for filename in filenames:
-                for record in data_record.generate_single_records_from_hdf5_file_v3(filename):
-                    single_target = get_target_from_record(record)
-                    target_batch = single_target[np.newaxis, ...]
-                    yield [target_batch]
-
-        _, ((mean_target_np, stddev_target_np),) \
-            = compute_dataset_stats(target_batches_generator(all_filenames))
-        print("Target data statistics:")
-        print("  Mean of target:", np.mean(mean_target_np.flatten()))
-        print("  Stddev of target:", np.mean(stddev_target_np.flatten()))
-
-        get_unnormalized_target_from_record = get_target_from_record
-
-        # Retrieval functions for normalized target
-        def get_target_from_record(record):
-            single_target = get_unnormalized_target_from_record(record)
-            if cfg.data.normalize_target:
-                single_target = (single_target - mean_target_np) / stddev_target_np
-            return single_target
-
-    # Report some stats on input and outputs for the first data file
-    # This is only for sanity checking
-    # TODO: This can be confusing as we just take mean and average over all 3d positions
     if args.verbose:
-        print("Stats on inputs and outputs")
-        tmp_inputs = [get_input_from_record(record) for record in tmp_records]
-        for i in xrange(tmp_inputs[0].shape[-1]):
-            values = [input[..., i] for input in tmp_inputs]
-            print("  Mean of input {}: {}".format(i, np.mean(values)))
-            print("  Stddev of input {}: {}".format(i, np.std(values)))
-            print("  Min of input {}: {}".format(i, np.min(values)))
-            print("  Max of input {}: {}".format(i, np.max(values)))
-        tmp_targets = [get_target_from_record(record) for record in tmp_records]
-        if len(tmp_targets[0].shape) > 1:
-            for i in xrange(tmp_targets[0].shape[-1]):
-                values = [target[..., i] for target in tmp_targets]
-                print("  Mean of target {}: {}".format(i, np.mean(values)))
-                print("  Stddev of target {}: {}".format(i, np.std(values)))
-                print("  Min of target {}: {}".format(i, np.min(values)))
-                print("  Max of target {}: {}".format(i, np.max(values)))
-        values = [target for target in tmp_targets]
-        print("  Mean of target: {}".format(np.mean(values)))
-        print("  Stddev of target: {}".format(np.std(values)))
-        print("  Min of target: {}".format(np.min(values)))
-        print("  Max of target: {}".format(np.max(values)))
-
-    # Retrieve input and target shapes
-    in_grid_3d = tmp_record.in_grid_3d
-    in_grid_3d_shape = list(in_grid_3d.shape)
-    input_shape = list(get_input_from_record(tmp_record).shape)
-    target_shape = list(get_target_from_record(tmp_record).shape)
-    print("Input and target shapes:")
-    print("  Shape of grid_3d: {}".format(in_grid_3d_shape))
-    print("  Shape of input: {}".format(input_shape))
-    print("  Shape of target: {}".format(target_shape))
+        input_pipeline.print_data_stats(all_filenames[0], get_input_from_record, get_target_from_record)
 
     # Setup TF step and epoch counters
     global_step_tf = tf.Variable(tf.constant(0, dtype=tf.int64), trainable=False, name='global_step')
@@ -616,81 +266,36 @@ def run(args):
     sess = tf.Session(config=tf_config)
     coord = tf.train.Coordinator()
 
-    class InputPipeline(object):
-
-        def _record_provider_factory(self, hdf5_input_pipeline):
-            def record_provider():
-                if cfg.data.fake_constant_data:
-                    single_input = np.ones(input_shape)
-                    single_target = np.ones(target_shape)
-                elif cfg.data.fake_random_data:
-                    single_input = np.random.randn(input_shape)
-                    single_target = np.random.randn(target_shape)
-                else:
-                    record = hdf5_input_pipeline.get_next_record()
-                    single_input = get_input_from_record(record)
-                    single_target = get_target_from_record(record)
-                assert(np.all(np.isfinite(single_input)))
-                assert(np.all(np.isfinite(single_target)))
-                return single_input, single_target
-            return record_provider
-
-        def __init__(self, filenames, queue_capacity, min_after_dequeue, shuffle, num_threads, name):
-            # Create HDF5 readers
-            self._hdf5_input_pipeline = data_record.HDF5ReaderProcessCoordinator(
-                filenames, coord, shuffle=shuffle, hdf5_record_version=data_record.HDF5_RECORD_VERSION_3,
-                timeout=cfg.io.async_timeout, num_processes=num_threads, verbose=args.verbose >= 2)
-            self._num_records = None
-
-            tensor_dtypes = [tf.float32, tf.float32]
-            tensor_shapes = [input_shape, target_shape]
-            self._tf_pipeline = data_provider.TFInputPipeline(
-                self._record_provider_factory(self._hdf5_input_pipeline),
-                sess, coord, batch_size_per_device, tensor_shapes, tensor_dtypes,
-                queue_capacity=queue_capacity,
-                min_after_dequeue=min_after_dequeue,
-                shuffle=shuffle,
-                num_threads=num_threads,
-                timeout=cfg.io.async_timeout,
-                name="{}_tf_input_pipeline".format(name),
-                verbose=args.verbose >= 2)
-
-            # Retrieve tensors from data bridge
-            self._input_batch, self._target_batch = self._tf_pipeline.tensors
-
-        def start(self):
-            self._hdf5_input_pipeline.start()
-            self._tf_pipeline.start()
-
-        @property
-        def num_records(self):
-            if self._num_records is None:
-                self._num_records = self._hdf5_input_pipeline.compute_num_records()
-            return self._num_records
-
-        @property
-        def tensors(self):
-            return self._tf_pipeline.tensors
-
-        @property
-        def input_batch(self):
-            return self._input_batch
-
-        @property
-        def target_batch(self):
-            return self._target_batch
-
-        @property
-        def threads(self):
-            return [self._hdf5_input_pipeline.thread] + self._tf_pipeline.threads
+    def parse_record(record):
+        single_input = get_input_from_record(record)
+        single_target = get_target_from_record(record)
+        return single_input, single_target
 
     with tf.device("/cpu:0"):
-        train_input_pipeline = InputPipeline(
-            train_filenames, cfg.tensorflow.cpu_train_queue_capacity, cfg.tensorflow.cpu_train_queue_min_after_dequeue,
-            shuffle=True, num_threads=cfg.tensorflow.cpu_train_queue_threads, name="train")
-        test_input_pipeline = InputPipeline(
-            test_filenames, cfg.tensorflow.cpu_test_queue_capacity, cfg.tensorflow.cpu_test_queue_min_after_dequeue,
-            shuffle=True, num_threads=cfg.tensorflow.cpu_test_queue_threads, name="test")
+        train_input_pipeline = input_pipeline.InputPipeline(
+            sess, coord, train_filenames, parse_record,
+            input_shape, target_shape, batch_size_per_device,
+            cfg.tensorflow.cpu_train_queue_capacity,
+            cfg.tensorflow.cpu_train_queue_min_after_dequeue,
+            shuffle=True,
+            num_threads=cfg.tensorflow.cpu_train_queue_threads,
+            timeout=cfg.io.async_timeout,
+            fake_constant_data=cfg.data.fake_constant_data,
+            fake_random_data=cfg.data.fake_random_data,
+            name="train",
+            verbose=args.verbose)
+        test_input_pipeline = input_pipeline.InputPipeline(
+            sess, coord, test_filenames, parse_record,
+            input_shape, target_shape, batch_size_per_device,
+            cfg.tensorflow.cpu_test_queue_capacity,
+            cfg.tensorflow.cpu_test_queue_min_after_dequeue,
+            shuffle=False,
+            num_threads=cfg.tensorflow.cpu_test_queue_threads,
+            timeout=cfg.io.async_timeout,
+            fake_constant_data=cfg.data.fake_constant_data,
+            fake_random_data=cfg.data.fake_random_data,
+            name="test",
+            verbose=args.verbose)
         print("# records in train dataset: {}".format(train_input_pipeline.num_records))
         print("# records in test dataset: {}".format(test_input_pipeline.num_records))
 

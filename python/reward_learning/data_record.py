@@ -459,6 +459,67 @@ class HDF5ReaderProcessCoordinator(object):
         return self._thread
 
 
+def compute_dataset_stats(batches_generator):
+    data_size = 0
+    sums = None
+    sq_sums = None
+    for batches in batches_generator:
+        if sums is None:
+            sums = [np.zeros(batch.shape[1:]) for batch in batches]
+            sq_sums = [np.zeros(batch.shape[1:]) for batch in batches]
+        for i, batch in enumerate(batches):
+            sums[i] += np.sum(batch, axis=0)
+            sq_sums[i] += np.sum(np.square(batch), axis=0)
+            assert(batch.shape[0] == batches[0].shape[0])
+        data_size += batches[0].shape[0]
+    means = []
+    stddevs = []
+    for i in xrange(len(sums)):
+        mean = sums[i] / data_size
+        stddev = (sq_sums[i] - np.square(sums[i]) / data_size) / (data_size - 1)
+        stddev[np.abs(stddev) < 1e-5] = 1
+        stddev = np.sqrt(stddev)
+        assert(np.all(np.isfinite(mean)))
+        assert(np.all(np.isfinite(stddev)))
+        means.append(mean)
+        stddevs.append(stddev)
+    return data_size, zip(means, stddevs)
+
+
+def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_scores=True):
+    assert(len(filenames) > 0)
+
+    def batches_generator(filenames, field_names):
+        for filename in filenames:
+            batches = []
+            record_batch = read_hdf5_records_v3(filename)
+            for name in field_names:
+                batch = getattr(record_batch, name)
+                batches.append(batch)
+            yield batches
+    data_size, stats = compute_dataset_stats(batches_generator(filenames, field_names))
+    if compute_z_scores:
+
+        def z_score_batches_generator(filenames, field_names):
+            for filename in filenames:
+                batches = []
+                record_batch = read_hdf5_records_v3(filename)
+                for i, name in enumerate(field_names):
+                    batch = getattr(record_batch, name)
+                    mean = stats[i][0]
+                    stddev = stats[i][1]
+                    z_score = (batch - mean[np.newaxis, ...]) / stddev[np.newaxis, ...]
+                    batches.append(z_score)
+                yield batches
+        _, z_score_stats = compute_dataset_stats(z_score_batches_generator(filenames, field_names))
+        all_stats = []
+        for i in xrange(len(stats)):
+            all_stats.append(stats[i])
+            all_stats.append(z_score_stats[i])
+        stats = all_stats
+    return data_size, stats
+
+
 def _int64_feature(value):
     return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
 

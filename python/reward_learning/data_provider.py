@@ -8,10 +8,14 @@ import tf_utils
 
 
 class QueueBridge(object):
-    def __init__(self, dequeue_fn, enqueue_fn, coord, verbose=False):
+    def __init__(self, coord, dequeue_fn, enqueue_fn, transform_fn=None, verbose=False):
         self._dequeue_fn = dequeue_fn
         self._enqueue_fn = enqueue_fn
         self._coord = coord
+        if transform_fn is None:
+            def transform_fn(x):
+                return x
+        self._transform_fn = transform_fn
         self._thread = None
         self._verbose = verbose
 
@@ -20,7 +24,8 @@ class QueueBridge(object):
             entry = self._dequeue_fn()
             if entry is None:
                 continue
-            self._enqueue_fn(entry)
+            transformed_entry = self._transform_fn(entry)
+            self._enqueue_fn(transformed_entry)
         if self._verbose:
             print("Stop request... Exiting QueueBridge thread")
 
@@ -59,9 +64,10 @@ class TFInputPipeline(object):
             # We need an extra thread that dequeues from the multiprocessing queue
             # and enqueues on the threading queue
             self._queue_bridges = [QueueBridge(
+                coord,
                 tensor_provider_fn,
                 self._data_bridge.enqueue,
-                coord, verbose) for _ in xrange(num_threads)]
+                verbose=verbose) for _ in xrange(num_threads)]
 
             # Retrieve tensors from data bridge
             self._tensors = self._data_bridge.deque_batch()
