@@ -1,0 +1,163 @@
+
+if(OCTOVIS_EXT_QT5)
+  find_package(Qt5Core REQUIRED)
+  find_package(Qt5Gui REQUIRED)
+  find_package(Qt5OpenGL REQUIRED)
+  find_package(Qt5Widgets REQUIRED)
+  find_package(Qt5Xml REQUIRED)
+  set(QT_LIBRARIES Qt5::Core Qt5::Gui Qt5::OpenGL Qt5::Widgets Qt5::Xml "${OPENGL_gl_LIBRARY}" "${OPENGL_glu_LIBRARY}")
+  include_directories(
+    "${Qt5Core_INCLUDE_DIRS}"
+    "${Qt5Gui_INCLUDE_DIRS}"
+    "${Qt5OpenGL_INCLUDE_DIRS}"
+    "${Qt5Widgets_INCLUDE_DIRS}"
+    "${Qt5Xml_INCLUDE_DIRS}"
+    )
+else(OCTOVIS_EXT_QT5)
+  # Qt4-support (more info: http://qtnode.net/wiki?title=Qt_with_cmake)
+  find_package(Qt4 REQUIRED)
+  set(QT_USE_QTOPENGL TRUE)
+  set(QT_USE_QTXML TRUE)
+  # include the files enabled above
+  include(${QT_USE_FILE})
+endif(OCTOVIS_EXT_QT5)
+
+# Mac OS X seems to require special linker flags:
+IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  SET (CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -framework OpenGL")
+  SET (CMAKE_SHARED_LINKER_FLAGS "${CMAKE_SHARED_LINKER_FLAGS} -framework OpenGL")
+  SET (CMAKE_MODULE_LINKER_FLAGS "${CMAKE_MODULE_LINKER_FLAGS} -framework OpenGL")
+ENDIF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+
+# sources for octovis_ext library
+set(viewerlib_SRCS
+	src/SceneObject.cpp
+	src/PointcloudDrawer.cpp
+	src/OcTreeDrawer.cpp
+	src/SelectionBox.cpp
+	src/TrajectoryDrawer.cpp
+	src/ColorOcTreeDrawer.cpp
+)
+
+# sources for viewer binary
+set(viewer_SRCS
+	src/main.cpp	
+	src/ViewerGui.cpp
+	src/ViewerWidget.cpp
+	src/ViewerSettings.cpp
+	src/ViewerSettingsPanel.cpp
+	src/ViewerSettingsPanelCamera.cpp
+	src/CameraFollowMode.cpp
+)	
+
+# Resource files (icons, ...)
+if(OCTOVIS_EXT_QT5)
+  QT5_ADD_RESOURCES(viewer_RES src/icons.qrc)
+else(OCTOVIS_EXT_QT5)
+  QT4_ADD_RESOURCES(viewer_RES src/icons.qrc)
+endif(OCTOVIS_EXT_QT5)
+
+#found QGLViewer lib dir
+link_directories(${QGLViewer_LIBRARY_DIR})
+
+INCLUDE_DIRECTORIES(
+  ${QGLViewer_INCLUDE_DIR}
+)
+
+SET(viewer_MOC_HDRS
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerGui.h
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerWidget.h
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettings.h
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettingsPanel.h
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettingsPanelCamera.h
+  ${PROJECT_SOURCE_DIR}/include/octovis_ext/CameraFollowMode.h
+)
+
+# generate list of MOC srcs:
+if(OCTOVIS_EXT_QT5)
+  QT5_WRAP_CPP(viewer_MOC_SRCS ${viewer_MOC_HDRS})
+else(OCTOVIS_EXT_QT5)
+  QT4_WRAP_CPP(viewer_MOC_SRCS ${viewer_MOC_HDRS})
+endif(OCTOVIS_EXT_QT5)
+
+# let cmake generate ui*.h files from .ui files (Qt Designer):
+SET(viewer_UIS
+    ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerGui.ui
+    ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettings.ui
+    ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettingsPanel.ui
+    ${PROJECT_SOURCE_DIR}/include/octovis_ext/ViewerSettingsPanelCamera.ui
+)
+if(OCTOVIS_EXT_QT5)
+  QT5_WRAP_UI(viewer_UIS_H ${viewer_UIS})
+else(OCTOVIS_EXT_QT5)
+  QT4_WRAP_UI(viewer_UIS_H ${viewer_UIS})
+endif(OCTOVIS_EXT_QT5)
+
+# Don't forget to include output directory, otherwise
+# the UI file won't be wrapped!
+include_directories(${CMAKE_CURRENT_BINARY_DIR} ${CMAKE_BINARY_DIR})
+
+
+# Library target 
+add_library(octovis_ext-static STATIC ${viewerlib_SRCS})
+target_link_libraries(octovis_ext-static)
+set_target_properties(octovis_ext-static PROPERTIES OUTPUT_NAME octovis_ext)
+
+add_library(octovis_ext-shared SHARED ${viewerlib_SRCS})
+target_link_libraries(octovis_ext-shared 
+  ${OPENGL_gl_LIBRARY} 
+  ${OPENGL_glu_LIBRARY} 
+  ${OCTOMAP_EXT_LIBRARIES}
+  ${QGLViewer_LIBRARIES}
+)
+set_target_properties(octovis_ext-shared PROPERTIES
+  OUTPUT_NAME octovis_ext
+  VERSION ${OCTOVIS_EXT_VERSION}
+  SOVERSION ${OCTOVIS_EXT_SOVERSION}
+)
+
+# directly depend on the octomap library target when building the
+# complete distribution, so it is recompiled as needed
+if (CMAKE_PROJECT_NAME STREQUAL "octomap-ext-distribution")
+  ADD_DEPENDENCIES(octovis_ext-static octomap_ext-static)
+  ADD_DEPENDENCIES(octovis_ext-shared octomap_ext)
+endif()
+
+
+# Now add these generated files to the ADD_EXECUTABLE step
+# If this is NOT done, then the ui_*.h files will not be generated
+add_executable(octovis_ext ${viewer_SRCS} ${viewer_UIS_H} ${viewer_MOC_SRCS} ${viewer_RES})
+
+target_link_libraries(octovis_ext 
+#  ${QGLViewer_LIBRARIES}
+  ${QT_LIBRARIES}
+  ${OCTOMAP_EXT_LIBRARIES}
+  octovis_ext-shared
+)
+
+# special handling of MacOS X:
+IF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+  add_custom_command(TARGET octovis_ext POST_BUILD
+    COMMAND install_name_tool -change libQGLViewer.2.dylib /opt/local/lib/libQGLViewer.2.dylib ${CMAKE_RUNTIME_OUTPUT_DIRECTORY}/octovis_ext
+  )
+ENDIF(${CMAKE_SYSTEM_NAME} MATCHES "Darwin")
+
+if(NOT EXISTS "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octovis_ext")
+  file(MAKE_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octovis_ext")
+endif()
+
+export(TARGETS octovis_ext octovis_ext-static octovis_ext-shared
+  FILE "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}/cmake/octovis_ext/octovis_ext-targets.cmake")
+
+install(TARGETS octovis_ext octovis_ext-static octovis_ext-shared
+  EXPORT octovis_ext-targets
+  INCLUDES DESTINATION include
+  ${INSTALL_TARGETS_DEFAULT_ARGS}
+)
+install(EXPORT octovis_ext-targets DESTINATION share/octovis_ext/)
+
+file(GLOB octovis_ext_HDRS ${PROJECT_SOURCE_DIR}/include/octovis_ext/*.h)
+# filter generated headers for GUI:
+list(REMOVE_ITEM octovis_ext_HDRS ${viewer_MOC_HDRS} ${viewer_UIS_H})
+install(FILES ${octovis_ext_HDRS} DESTINATION include/octovis_ext)
+

@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 from __future__ import print_function
+from __future__ import division
 
 import os
 import argparse
@@ -7,21 +8,97 @@ import numpy as np
 import data_record
 import env_factory
 import file_helpers
-import RLrecon.environments.environment as RLenvironment
+from utils import argparse_bool
+from policy_helpers import VisitedPoses
+from RLrecon import math_utils
 
-import matplotlib.pyplot as plt
+
+def plot_grid(occupancies_3d, observation_certainties_3d):
+    import visualize_data
+    import visualization
+    import mayavi.mlab as mlab
+    x, y, z = visualize_data.get_xyz_grids(occupancies_3d, scale=0.1)
+
+    s = occupancies_3d
+    fig = visualize_data.create_mlab_figure()
+    visualize_data.plot3d_with_threshold(x, y, z, s, low_thres=0.2, fig=fig)
+    mlab.title("Occupancy")
+    mlab.scalarbar()
+
+    s = occupancies_3d
+    fig = visualize_data.create_mlab_figure()
+    visualize_data.plot3d_with_threshold(x, y, z, s, fig=fig)
+    mlab.title("Occupancy")
+    mlab.scalarbar()
+
+    s = observation_certainties_3d
+    fig = visualize_data.create_mlab_figure()
+    visualize_data.plot3d_with_threshold(x, y, z, s, high_thres=0.5, fig=fig)
+    mlab.title("Observation count")
+    mlab.scalarbar()
+
+    s = observation_certainties_3d
+    fig = visualize_data.create_mlab_figure()
+    visualize_data.plot3d_with_threshold(x, y, z, s, fig=fig)
+    mlab.title("Observation count2")
+    mlab.scalarbar()
+
+    mlab.show()
 
 
-def get_environment_class_by_name(environment_name):
-    if environment_name == "HorizontalEnvironment":
-        environment_class = RLenvironment.HorizontalEnvironment
-    elif environment_name == "SimpleV0Environment":
-        environment_class = RLenvironment.SimpleV0Environment
-    elif environment_name == "SimpleV2Environment":
-        environment_class = RLenvironment.SimpleV2Environment
-    else:
-        raise NotImplementedError("Unknown environment class: {}".format(environment_name))
-    return environment_class
+def query_octomap(environment, pose, obs_levels, obs_sizes, map_resolution, axis_mode=0, forward_factor=3 / 8.):
+    obs_sizes_x = obs_sizes[0]
+    obs_sizes_y = obs_sizes[1]
+    obs_sizes_z = obs_sizes[2]
+    grid_3ds = None
+    for k in xrange(len(obs_levels)):
+        obs_level = obs_levels[k]
+        obs_size_x = obs_sizes_x[k]
+        obs_size_y = obs_sizes_y[k]
+        obs_size_z = obs_sizes_z[k]
+
+        obs_resolution = map_resolution * (2 ** obs_level)
+        offset_x = obs_resolution * obs_sizes_x[0] * forward_factor
+        offset_vec = math_utils.rotate_vector_with_rpy(pose.orientation_rpy(), [offset_x, 0, 0])
+        query_location = pose.location() + offset_vec
+        query_pose = environment.Pose(query_location, pose.orientation_rpy())
+
+        res = environment.get_mapper().perform_query_subvolume_rpy(
+            query_pose.location(), query_pose.orientation_rpy(),
+            obs_level, obs_size_x, obs_size_y, obs_size_z, axis_mode)
+        occupancies = np.asarray(res.occupancies, dtype=np.float32)
+        occupancies_3d = np.reshape(occupancies, (obs_size_x, obs_size_y, obs_size_z))
+        observation_certainties = np.asarray(res.observation_certainties, dtype=np.float32)
+        observation_certainties_3d = np.reshape(observation_certainties, (obs_size_x, obs_size_y, obs_size_z))
+        # Plot histograms
+        # num_bins = 50
+        # plt.figure()
+        # plt.hist(occupancies_3d.flatten(), num_bins)
+        # plt.title("occupancies level {}".format(obs_level))
+        # plt.figure()
+        # plt.hist(observation_certainties.flatten(), num_bins)
+        # plt.title("observation counts level {}".format(obs_level))
+        # print("Stats for occupancies level {}".format(obs_level))
+        # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
+        #     np.mean(occupancies_3d.flatten()),
+        #     np.std(occupancies_3d.flatten()),
+        #     np.min(occupancies_3d.flatten()),
+        #     np.max(occupancies_3d.flatten()),
+        # ))
+        # print("Stats for observation count level {}".format(obs_level))
+        # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
+        #     np.mean(observation_certainties.flatten()),
+        #     np.std(observation_certainties.flatten()),
+        #     np.min(observation_certainties.flatten()),
+        #     np.max(observation_certainties.flatten()),
+        # ))
+        grid_3d = np.stack([occupancies_3d, observation_certainties_3d], axis=-1)
+        if grid_3ds is None:
+            grid_3ds = grid_3d
+        else:
+            grid_3ds = np.concatenate([grid_3ds, grid_3d], axis=-1)
+    # plt.show()
+    return grid_3ds
 
 
 def run(args):
@@ -36,25 +113,58 @@ def run(args):
     reset_score_threshold = 0.5
     check_written_records = False
 
-    epsilon = 0.1
+    epsilon = args.epsilon
 
-    obs_levels = [0, 1, 2, 3]
-    obs_sizes_x = [16] * len(obs_levels)
+    obs_levels = [int(x) for x in args.obs_levels.trim("[]").split(",")]
+    obs_size = args.obs_size
+    # obs_levels = [0, 1, 2, 3]
+    # obs_levels = [1]
+    obs_sizes_x = [obs_size] * len(obs_levels)
     obs_sizes_y = obs_sizes_x
     obs_sizes_z = obs_sizes_x
+    obs_sizes = [obs_sizes_x, obs_sizes_y, obs_sizes_z]
+    axis_mode = args.axis_mode
+    forward_factor = args.forward_factor
+    # axis_mdoe = 1
+    # forward_factor = 0.
+    print("obs_levels={}".format(obs_levels))
+    print("obs_size={}".format(obs_size))
+    print("axis_mode={}".format(axis_mode))
+    print("forward_factor={}".format(forward_factor))
 
-    environment_class = get_environment_class_by_name(args.environment)
+    environment_class = env_factory.get_environment_class_by_name(args.environment)
     client_id = args.client_id
     environment = env_factory.create_environment(environment_class, client_id)
 
     # environment.get_engine().test()
 
     intrinsics = environment.get_engine().get_intrinsics()
+    result = environment.get_mapper().perform_info()
+    map_resolution = result.resolution
+
+    if args.manual:
+        import time
+        environment.reset(keep_pose=True)
+        while True:
+            current_pose = environment.get_pose()
+            # Query octomap
+            in_grid_3ds = query_octomap(environment, current_pose, obs_levels, obs_sizes,
+                                        map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
+            plot_grid(in_grid_3ds[..., 0], in_grid_3ds[..., 1])
+
+            depth_image = environment.get_engine().get_depth_image()
+            result = environment.get_mapper().perform_insert_depth_map_rpy(
+                current_pose.location(), current_pose.orientation_rpy(),
+                depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+
+            time.sleep(1)
+        return
 
     current_file_num = 0
     records = []
     environment.reset()
     prev_action = np.random.randint(0, environment.get_num_of_actions())
+    reset_env = False
     for i in xrange(num_records):
         print("Record #{}".format(i))
         current_pose = environment.get_pose()
@@ -68,100 +178,62 @@ def run(args):
 
         print("  scores: {}".format(scores))
 
-        if i % reset_interval == 0 or prob_score >= reset_score_threshold:
+        if reset_env or \
+                (i % reset_interval == 0) \
+                or normalized_prob_score >= reset_score_threshold:
+            print("Resetting environment")
+            reset_env = False
             environment.reset()
+            visited_poses = VisitedPoses(3 + 4, np.concatenate([np.ones((3,)), 10. * np.ones((4,))]))
 
-        new_poses = []
-        depth_images = []
-
-        # Query octomap
-        grid_3ds = None
-        for k in xrange(len(obs_levels)):
-            obs_level = obs_levels[k]
-            obs_size_x = obs_sizes_x[k]
-            obs_size_y = obs_sizes_y[k]
-            obs_size_z = obs_sizes_z[k]
-            res = environment.get_mapper().perform_query_subvolume_rpy(
-                current_pose.location(), current_pose.orientation_rpy(),
-                obs_level, obs_size_x, obs_size_y, obs_size_z)
-            occupancies = np.asarray(res.occupancies, dtype=np.float32)
-            occupancies_3d = np.reshape(occupancies, (obs_size_x, obs_size_y, obs_size_z))
-            observation_counts = np.asarray(res.observation_counts, dtype=np.float32)
-            # observation_counts /= (10.0 * 2 ** obs_level)
-            # observation_counts = np.minimum(observation_counts, 10.0)
-            observation_counts_3d = np.reshape(observation_counts, (obs_size_x, obs_size_y, obs_size_z))
-            # Plot histograms
-            # num_bins = 50
-            # plt.figure()
-            # plt.hist(occupancies_3d.flatten(), num_bins)
-            # plt.title("occupancies level {}".format(obs_level))
-            # plt.figure()
-            # plt.hist(observation_counts.flatten(), num_bins)
-            # plt.title("observation counts level {}".format(obs_level))
-            # print("Stats for occupancies level {}".format(obs_level))
-            # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
-            #     np.mean(occupancies_3d.flatten()),
-            #     np.std(occupancies_3d.flatten()),
-            #     np.min(occupancies_3d.flatten()),
-            #     np.max(occupancies_3d.flatten()),
-            # ))
-            # print("Stats for observation count level {}".format(obs_level))
-            # print("  Mean: {}\n  Stddev: {}\n  Min: {}\n  Max: {}".format(
-            #     np.mean(observation_counts.flatten()),
-            #     np.std(observation_counts.flatten()),
-            #     np.min(observation_counts.flatten()),
-            #     np.max(observation_counts.flatten()),
-            # ))
-            grid_3d = np.stack([occupancies_3d, observation_counts_3d], axis=-1)
-            if grid_3ds is None:
-                grid_3ds = grid_3d
-            else:
-                grid_3ds = np.concatenate([grid_3ds, grid_3d], axis=-1)
-        # plt.show()
+        visited_poses.add_visited_pose(current_pose)
 
         # Simulate effect of actions and compute depth maps and rewards
-        results = []
-        rewards = np.zeros((environment.get_num_of_actions(),))
-        norm_rewards = np.zeros((environment.get_num_of_actions(),))
         prob_rewards = np.zeros((environment.get_num_of_actions(),))
-        norm_prob_rewards = np.zeros((environment.get_num_of_actions(),))
+        visit_counts = np.zeros((environment.get_num_of_actions(),))
         for action in xrange(environment.get_num_of_actions()):
+            if i > 0 and environment.is_action_colliding(current_pose, action):
+                print("Action {} would collide".format(action))
+                prob_rewards[action] = -1
+                visit_counts[action] = 0
+                continue
             new_pose = environment.simulate_action_on_pose(current_pose, action)
             environment.set_pose(new_pose, wait_until_set=True)
             # point_cloud = environment._get_depth_point_cloud(new_pose)
             # result = environment.get_mapper().perform_insert_point_cloud_rpy(
             #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
             depth_image = environment.get_engine().get_depth_image()
-            new_poses.append(new_pose)
-            depth_images.append(depth_image)
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 new_pose.location(), new_pose.orientation_rpy(),
                 depth_image, intrinsics, downsample_to_grid=True, simulate=True)
-            reward = result.reward
-            norm_reward = result.normalized_reward
             prob_reward = result.probabilistic_reward
-            norm_prob_reward = result.normalized_probabilistic_reward
 
-            print("  action={}, reward={}, prob_reward={}".format(action, reward, prob_reward))
-
-            rewards[action] = reward
-            norm_rewards[action] = norm_reward
             prob_rewards[action] = prob_reward
-            norm_prob_rewards[action] = norm_prob_reward
             assert(prob_reward >= 0)
-            results.append(result)
 
-        # Keep record for saving later
-        record = data_record.RecordV2(obs_levels, grid_3ds, rewards, norm_rewards,
-                                      prob_rewards, norm_prob_rewards, scores)
-        records.append(record)
+            visit_count = visited_poses.get_visit_count(new_pose)
+            visit_counts[action] = visit_count
+
+        print("Possible rewards: {}".format(prob_rewards))
+
+        visit_counts = np.array(visit_counts, dtype=np.float32)
+        visit_weights = 1. / (visit_counts + 1)
+        adjusted_rewards = prob_rewards * visit_weights
+        print("Adjusted expected rewards:", adjusted_rewards)
+
+        if np.all(prob_rewards[action] < 0):
+            reset_env = True
+            continue
 
         # Perform epsilon-greedy action.
         if np.random.rand() < epsilon:
-            action = np.random.randint(0, environment.get_num_of_actions())
+            valid_action_indices = np.arange(environment.get_num_of_actions())
+            valid_action_indices = valid_action_indices[prob_rewards >= 0]
+            assert(len(valid_action_indices) > 0)
+            action = np.random.choice(valid_action_indices)
         else:
-            max_prob_reward = np.max(prob_rewards)
-            actions = np.arange(environment.get_num_of_actions())[prob_rewards == max_prob_reward]
+            max_prob_reward = np.max(adjusted_rewards)
+            actions = np.arange(environment.get_num_of_actions())[adjusted_rewards == max_prob_reward]
             if len(actions) == 1:
                 action = actions[0]
             else:
@@ -170,45 +242,57 @@ def run(args):
                     action = prev_action
                 else:
                     action = np.random.choice(actions)
+        # print("Selected action: {}".format(action))
 
-        # TODO: When getting the depth image again here, sometimes it differs
-        #       from the depth image in the loop above (i.e. leading to a different reward).
-        #       It's not clear why this happens. Simple tests on Unreal Engine and UnrealCV
-        #       indicate that the depth maps do not change.
-        # new_pose = environment.simulate_action_on_pose(current_pose, action)
-        # environment.set_pose(new_pose, wait_until_set=True)
-        # depth_image = environment.get_engine().get_depth_image()
-        # result = environment.get_mapper().perform_insert_depth_map_rpy(
-        #     new_pose.location(), new_pose.orientation_rpy(),
-        #     depth_image, intrinsics, downsample_to_grid=True, simulate=False)
-        #
-        # if not np.all(depth_image == depth_images[action]):
-        #     diff_image = np.abs(depth_image - depth_images[action])
-        #     print(np.sum(diff_image > 0))
-        #     print(np.max(diff_image))
-        #     max_depth = np.max(depth_image[diff_image > 0])
-        #     import cv2
-        #     cv2.imshow("depth_image1", depth_image / max_depth)
-        #     cv2.imshow("depth_image2", depth_images[action] / max_depth)
-        #     cv2.imshow("diff_image", diff_image / np.max(diff_image))
-        #     cv2.waitKey(0)
-        # assert(np.all(depth_image == depth_images[action]))
+        if adjusted_rewards[action] < 0:
+            reset_env = True
+            continue
 
-        environment.set_pose(new_poses[action], wait_until_set=True)
+        new_pose = environment.simulate_action_on_pose(current_pose, action)
+        environment.set_pose(new_pose, wait_until_set=True)
+
+        # Get current scores
+        result = environment.get_mapper().perform_info()
+        scores = np.array([result.score, result.normalized_score,
+                           result.probabilistic_score, result.normalized_probabilistic_score])
+
+        # point_cloud = environment._get_depth_point_cloud(new_pose)
+        # result = environment.get_mapper().perform_insert_point_cloud_rpy(
+        #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
+        depth_image = environment.get_engine().get_depth_image()
+
+        # Query octomap
+        in_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
+                                    map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
+        if args.visualize:
+            fig = 1
+            import visualization
+            visualization.plot_grid(in_grid_3ds[..., 4], in_grid_3ds[..., 5], title_prefix="input", show=False, fig_offset=fig)
+            visualization.show(stop=True)
+
         result = environment.get_mapper().perform_insert_depth_map_rpy(
-            new_poses[action].location(), new_poses[action].orientation_rpy(),
-            depth_images[action], intrinsics, downsample_to_grid=True, simulate=False)
-        print("Selected action: {}".format(action))
-        assert(prob_rewards[action] == result.probabilistic_reward)
-        # print("score={}".format(result.score))
-        # print("probabilistic_score={}".format(result.probabilistic_score))
-        # print("normalized_score={}".format(result.normalized_score))
-        # print("normalized_probabilistic_score={}".format(result.normalized_probabilistic_score))
-        assert(record.rewards[action] == result.reward)
+            new_pose.location(), new_pose.orientation_rpy(),
+            depth_image, intrinsics, downsample_to_grid=True, simulate=False)
 
-        # print("action={}, reward={}".format(action, reward))
+        # Query octomap
+        out_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
+                                     map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
+
+        print("Selected action={}, probabilistic reward={}".format(action, result.probabilistic_reward))
+        print("Grid differences:", [np.sum(out_grid_3ds[..., i] - in_grid_3ds[..., i]) for i in xrange(in_grid_3ds.shape[-1])])
+
+        # Keep record for saving later
+        rewards = np.array([result.reward, result.normalized_reward,
+                            result.probabilistic_reward, result.normalized_probabilistic_reward])
+        # scores = np.array([result.score, result.normalized_score,
+        #                    result.probabilistic_score, result.normalized_probabilistic_score])
+        record = data_record.RecordV3(obs_levels, in_grid_3ds, out_grid_3ds,
+                                      rewards, scores)
 
         prev_action = action
+
+        if not args.dry_run:
+            records.append(record)
 
         if not args.dry_run and len(records) % records_per_file == 0:
             # filename, current_file_num = get_next_output_tf_filename(current_file_num)
@@ -216,26 +300,36 @@ def run(args):
                 current_file_num, template=filename_template)
             print("Writing records to file {}".format(filename))
             # write_tf_records(filename, records)
-            data_record.write_hdf5_records_v2(filename, records)
+            data_record.write_hdf5_records_v3(filename, records)
             if check_written_records:
                 print("Reading records from file {}".format(filename))
-                records_read = data_record.read_hdf5_records_v2_as_list(filename)
+                records_read = data_record.read_hdf5_records_v3_as_list(filename)
                 for record, record_read in zip(records, records_read):
                     assert(np.all(record.obs_levels == record_read.obs_levels))
-                    for grid_3d, grid_3d_read in zip(record.grid_3d, record_read.grid_3d):
-                        assert(np.all(grid_3d == grid_3d_read))
+                    for in_grid_3d, in_grid_3d_read in zip(record.in_grid_3d, record_read.in_grid_3d):
+                        assert(np.all(in_grid_3d == in_grid_3d_read))
+                    for out_grid_3d, out_grid_3d_read in zip(record.out_grid_3d, record_read.out_grid_3d):
+                        assert(np.all(out_grid_3d == out_grid_3d_read))
                     assert(np.all(record.rewards == record_read.rewards))
+                    assert(np.all(record.scores == record_read.scores))
             records = []
 
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser(description=None)
     # parser.add_argument('-v', '--verbose', action='count', dest='verbosity', default=0, help='Set verbosity.')
+    parser.add_argument('--manual', action='store_true')
     parser.add_argument('--dry-run', action='store_true', help="Do not save anything")
     parser.add_argument('--output-path', type=str, help="Output path")
-    parser.add_argument('--environment', type=str, help="Environment name")
+    parser.add_argument('--environment', type=str, required=True, help="Environment name")
+    parser.add_argument('--obs-levels', default="0,1,2,3,4", type=str)
+    parser.add_argument('--obs-size', default=16, type=int)
     parser.add_argument('--num-records', default=10000, type=int, help="Total records to collect")
+    parser.add_argument('--epsilon', default=0.2, type=float)
+    parser.add_argument('--axis-mode', default=0, type=int)
+    parser.add_argument('--forward-factor', default=3 / 8., type=float)
     parser.add_argument('--client-id', default=0, type=int)
+    parser.add_argument('--visualize', type=argparse_bool, default=False)
 
     args = parser.parse_args()
 
