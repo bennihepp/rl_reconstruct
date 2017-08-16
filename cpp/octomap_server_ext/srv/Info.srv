@@ -1,0 +1,22 @@
+---
+string tree_type
+
+float64 resolution
+int64 num_nodes
+int64 num_leaf_nodes
+
+float64 occupancy_clamp_min
+float64 occupancy_clamp_max
+float64 occupancy_log_odds_clamp_min
+float64 occupancy_log_odds_clamp_max
+float64 occupancy_thres
+float64 occupancy_log_odds_thres
+float64 prob_hit
+float64 prob_hit_log_odds
+float64 prob_miss
+float64 prob_miss_log_odds
+
+float64 score
+float64 normalized_score
+float64 probabilistic_score
+float64 normalized_probabilistic_score

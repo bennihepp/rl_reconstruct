@@ -1,7 +1,4 @@
 geometry_msgs/Point min
 geometry_msgs/Point max
-float32 occupancy
-float32 observation_count
-bool densify
 ---
 bool success

@@ -1,0 +1,41 @@
+<launch>
+
+  <node pkg="nodelet" type="nodelet" name="standalone_nodelet"  args="manager"/>
+
+  <node pkg="nodelet" type="nodelet" name="octomap_server_ext_nodelet" args="load octomap_server_ext/OctomapServerExtNodelet standalone_nodelet", output="screen">
+
+    <!-- initial map file ("" for empty map) -->
+    <param name="map_file" value="" type="str" />
+
+    <!-- voxel size -->
+    <param name="resolution" value="0.2" type="double" />
+
+    <!-- fixed map frame (set to 'map' if SLAM or localization running!) -->
+    <param name="frame_id" type="string" value="map" />
+
+    <!-- maximum range to integrate (speedup!) -->
+    <param name="sensor_model/max_range" value="15.0" type="double" />
+
+    <!-- data source to integrate (PointCloud2) -->
+    <!-- <remap from="cloud_in" to="/narrow_stereo/points_filtered2" /> -->
+
+    <!-- score/reward per voxel -->
+    <param name="score_per_voxel" value="0.001" type="double" />
+
+    <!-- score/reward per surface voxel -->
+    <param name="score_per_surface_voxel" value="1.0" type="double" />
+
+    <!-- occupancy threshold below which a voxel is considered to be free -->
+    <param name="voxel_free_threshold" value="0.25" type="double" />
+
+    <!-- occupancy threshold above which a voxel is considered to be occupied -->
+    <param name="voxel_occupied_threshold" value="0.75" type="double" />
+
+    <!-- whether to only consider surface voxels for score and reward -->
+    <param name="use_only_surface_voxels_for_score" value="true" type="bool" />
+
+    <!-- name of file with surface voxel positions -->
+    <param name="surface_voxel_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/surface_voxels.txt" type="str" />
+
+  </node>
+</launch>

@@ -56,8 +56,12 @@ int main(int argc, char** argv){
   }
 
   // Set default log level to INFO
-  if( ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug) ) {
-    ros::console::notifyLoggerLevelsChanged();
+  bool log_debug = false;
+  private_nh.getParam("log_debug", log_debug);
+  if (log_debug) {
+    if(ros::console::set_logger_level(ROSCONSOLE_DEFAULT_NAME, ros::console::levels::Debug) ) {
+      ros::console::notifyLoggerLevelsChanged();
+    }
   }
 
   OctomapServerExt server;

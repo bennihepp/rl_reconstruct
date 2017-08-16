@@ -1,6 +1,9 @@
 cmake_minimum_required(VERSION 2.8)
 project(octomap_server_ext)
 
+include("cmake/CheckC11.cmake")
+add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1)
+
 set(PACKAGE_DEPENDENCIES
   rospy
   roscpp
@@ -11,7 +14,7 @@ set(PACKAGE_DEPENDENCIES
   nav_msgs
   std_msgs
   std_srvs
-  octomap_ros
+  octomap_ext_ros
   octomap_msgs
   dynamic_reconfigure
   nodelet
@@ -23,18 +26,15 @@ find_package(catkin REQUIRED COMPONENTS ${PACKAGE_DEPENDENCIES})
 
 find_package(PCL REQUIRED QUIET COMPONENTS common sample_consensus io segmentation filters)
 
-find_package(octomap REQUIRED)
+find_package(octomap_ext REQUIRED)
 add_definitions(-DOCTOMAP_NODEBUGOUT)
 
 include_directories(
   include
   ${catkin_INCLUDE_DIRS}
   ${PCL_INCLUDE_DIRS}
-  ${OCTOMAP_INCLUDE_DIRS}
+  ${OCTOMAP_EXT_INCLUDE_DIRS}
 )
-
-include("cmake/CheckC11.cmake")
-add_definitions(-D_GLIBCXX_USE_CXX11_ABI=1)
 
 # Add Eigen dependency
 find_package(Eigen3 REQUIRED)
@@ -72,10 +72,14 @@ add_message_files(
 ## Declare ROS messages and services
 add_service_files(
   FILES
+  Info.srv
+  SetScoreBoundingBox.srv
   InsertPointCloud.srv
+  InsertDepthMap.srv
   Raycast.srv
   RaycastCamera.srv
   QueryVoxels.srv
+  QuerySubvolume.srv
   ClearBoundingBox.srv
   OverrideBoundingBox.srv
 )
@@ -92,16 +96,16 @@ catkin_package(
   INCLUDE_DIRS include
   LIBRARIES ${PROJECT_NAME}
   CATKIN_DEPENDS ${PACKAGE_DEPENDENCIES}
-  DEPENDS octomap PCL
+  DEPENDS octomap_ext PCL
 )
 
 set(LINK_LIBS
-  ${OCTOMAP_LIBRARIES}
+  ${OCTOMAP_EXT_LIBRARIES}
   ${catkin_LIBRARIES}
   ${PCL_LIBRARIES}
 )
 
-add_library(${PROJECT_NAME} src/OctomapServerExt.cpp)
+add_library(${PROJECT_NAME} src/OctomapServerExt.cpp include/octomap_server_ext/conversions_msg.h)
 target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
 add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}_gencfg)
 

@@ -29,7 +29,7 @@
 
 #include <ros/ros.h>
 #include <octomap_msgs/conversions.h>
-#include <octomap/octomap.h>
+#include <octomap_ext/octomap.h>
 #include <fstream>
 
 #include <octomap_msgs/GetOctomap.h>

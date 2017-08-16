@@ -1,6 +1,12 @@
 Ray[] rays
 bool ignore_unknown_voxels
 float32 max_range
+bool override_thresholds
+float32 occupancy_occupied_threshold
+float32 occupancy_free_threshold
+float32 observation_certainty_occupied_threshold
+float32 observation_certainty_free_threshold
+bool only_in_score_bounding_box
 ---
 float32 elapsed_seconds
 int32 num_hits_occupied

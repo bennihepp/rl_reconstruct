@@ -1,5 +1,17 @@
+std_msgs/Header header
 geometry_msgs/Transform sensor_to_world
-sensor_msgs/PointCloud2 point_cloud
+
+uint32 height
+uint32 width
+uint32 stride
+float32[] depths
+
+float32 focal_length_x
+float32 focal_length_y
+float32 principal_point_x
+float32 principal_point_y
+
+bool downsample_to_grid
 bool simulate
 ---
 float32 elapsed_seconds
@@ -11,3 +23,5 @@ float32 probabilistic_score
 float32 normalized_probabilistic_score
 float32 probabilistic_reward
 float32 normalized_probabilistic_reward
+
+geometry_msgs/Point32[] used_pixel_coordinates

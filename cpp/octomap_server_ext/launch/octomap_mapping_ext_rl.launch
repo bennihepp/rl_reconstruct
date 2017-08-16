@@ -1,0 +1,59 @@
+<launch>
+
+  <arg name="surface_voxel_filename" default="" />
+  <arg name="binary_surface_voxel_filename" default="" />
+  <arg name="voxel_size" default="0.25" />
+  <arg name="max_range" default="15.0" />
+
+  <node name="octomap_server_ext" pkg="octomap_server_ext" type="octomap_server_ext_node" output="screen">
+
+    <!-- enable debug level logging -->
+    <param name="log_debug" value="true" type="bool" />
+
+    <!-- initial map file ("" for empty map) -->
+    <param name="map_file" value="" type="str" />
+
+    <!-- voxel size -->
+    <param name="resolution" value="$(arg voxel_size)" type="double" />
+
+    <!-- fixed map frame (set to 'map' if SLAM or localization running!) -->
+    <param name="frame_id" type="string" value="map" />
+
+    <!-- maximum range to integrate (speedup!) -->
+    <param name="sensor_model/max_range" value="$(arg max_range)" type="double" />
+
+    <!-- data source to integrate (PointCloud2) -->
+    <!-- <remap from="cloud_in" to="/narrow_stereo/points_filtered2" /> -->
+
+    <!-- score/reward per voxel -->
+    <param name="score_per_voxel" value="0.001" type="double" />
+
+    <!-- score/reward per surface voxel -->
+    <param name="score_per_surface_voxel" value="1.0" type="double" />
+
+    <!-- occupancy threshold below which a voxel is considered to be free -->
+    <param name="voxel_free_threshold" value="0.25" type="double" />
+
+    <!-- occupancy threshold above which a voxel is considered to be occupied -->
+    <param name="voxel_occupied_threshold" value="0.75" type="double" />
+
+    <!-- whether to only consider surface voxels for score and reward -->
+    <param name="use_only_surface_voxels_for_score" value="true" type="bool" />
+
+    <!-- name of file with surface voxel positions -->
+    <!-- <param name="surface_voxel_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/medieval_building/surface_voxels.txt" type="str" /> -->
+    <param name="surface_voxel_filename" value="$(arg surface_voxel_filename)" type="str" />
+    <param name="binary_surface_voxel_filename" value="$(arg binary_surface_voxel_filename)" type="str" />
+
+    <!-- spherical grid resolution -->
+    <param name="spherical_grid_yaw_step_degrees" value="2" type="double" />
+    <param name="spherical_grid_pitch_step_degrees" value="2" type="double" />
+
+    <!-- Observation count saturation -->
+    <param name="observation_count_saturation" value="3.0" type="double" />
+
+    <!-- Latch messages? -->
+    <param name="latch" value="false" type="bool" />
+
+  </node>
+</launch>

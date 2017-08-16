@@ -28,9 +28,9 @@
   <build_depend>nav_msgs</build_depend>
   <build_depend>std_msgs</build_depend>
   <build_depend>std_srvs</build_depend>
-  <build_depend>octomap</build_depend>
-  <build_depend>octomap_msgs</build_depend>  
-  <build_depend>octomap_ros</build_depend>
+  <build_depend>octomap_ext</build_depend>
+  <build_depend>octomap_msgs</build_depend>
+  <build_depend>octomap_ext_ros</build_depend>
   <build_depend>dynamic_reconfigure</build_depend>
   <build_depend>nodelet</build_depend>
   <build_depend>message_generation</build_depend>
@@ -45,9 +45,9 @@
  <run_depend>nav_msgs</run_depend>
  <run_depend>std_msgs</run_depend>
  <run_depend>std_srvs</run_depend>
- <run_depend>octomap</run_depend>
+ <run_depend>octomap_ext</run_depend>
  <run_depend>octomap_msgs</run_depend>
- <run_depend>octomap_ros</run_depend>
+ <run_depend>octomap_ext_ros</run_depend>
  <run_depend>dynamic_reconfigure</run_depend>
  <run_depend>nodelet</run_depend>
  <run_depend>message_generation</run_depend>
