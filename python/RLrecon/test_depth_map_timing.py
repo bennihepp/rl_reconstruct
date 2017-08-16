@@ -4,11 +4,10 @@ import numpy as np
 import cv2
 import rospy
 import tf
-from tf import transformations
 import tf_conversions
 from geometry_msgs.msg import Transform
 from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
-from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
 
 
 def run(engine):
@@ -39,24 +38,25 @@ def run(engine):
         #     yaw -= 2 * np.pi
         # elif yaw < 0:
         #     yaw += 2 * np.pi
-        engine.set_orientation_rpy(roll, pitch, yaw)
+        # engine.set_orientation_rpy(roll, pitch, yaw)
         # Update camera location
-        engine.set_location(location)
+        # engine.set_location(location)
         # rospy.logdebug("location: {} {} {}".format(*new_location))
         # rospy.logdebug("rotation: {} {} {}".format(roll * 180 / np.pi, pitch * 180 / np.pi, yaw * 180 / np.pi))
 
         # Read new pose, camera info and depth image
         depth_image = engine.get_depth_image()
-        rospy.loginfo("mode={}, min depth={}, max depth={}".format(
-            mode, np.min(depth_image.flatten()), np.max(depth_image.flatten())))
-        if mode == 0:
-            assert(np.min(depth_image) < 4)
-        elif mode == 1:
-            assert(np.min(depth_image) > 6)
-        elif mode == 2:
-            assert(np.min(depth_image) > 6)
-        else:
-            assert(np.min(depth_image) < 4)
+        depth_point_cloud = engine.get_depth_point_cloud_rpy(engine.get_location(), engine.get_orientation_rpy())
+        # rospy.loginfo("mode={}, min depth={}, max depth={}".format(
+        #     mode, np.min(depth_image.flatten()), np.max(depth_image.flatten())))
+        # if mode == 0:
+        #     assert(np.min(depth_image) < 4)
+        # elif mode == 1:
+        #     assert(np.min(depth_image) > 6)
+        # elif mode == 2:
+        #     assert(np.min(depth_image) > 6)
+        # else:
+        #     assert(np.min(depth_image) < 4)
         # Update camera state
         mode += 1
         mode = mode % 4

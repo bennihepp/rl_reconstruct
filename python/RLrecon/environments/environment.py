@@ -1,10 +1,8 @@
 from __future__ import print_function
-
-from mercurial.hg import update
-
 import numpy as np
-import math_utils
-from utils import Timer
+from RLrecon import math_utils
+from RLrecon.math_utils import convert_rpy_to_quat
+from RLrecon.utils import Timer
 
 
 TERMINAL_SCORE_THRESHOLD = 0.75
@@ -63,13 +61,15 @@ class BaseEnvironment(object):
 
     def __init__(self,
                  world_bounding_box,
-                 action_map,
+                 action_list,
                  update_map_flags=None,
                  action_rewards=None,
                  engine=None,
                  mapper=None,
                  clear_size=6.0,
                  action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
+                 action_not_valid_reward=DEFAULT_ACTION_NOT_VALID_REWARD,
+                 terminal_score_threshold=TERMINAL_SCORE_THRESHOLD,
                  filter_depth_map=False,
                  use_ros=True,
                  ros_pose_topic='agent_pose',
@@ -79,7 +79,7 @@ class BaseEnvironment(object):
 
         Args:
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
-            action_map (list): Mapping from index to an action function.
+            action_list (list): Mapping from index to an action function.
             update_map_flags (list): Flags indicating whether the map should be updated on the corresponding action.
             action_rewards (list): Instantanious contributions to the reward for each action.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
@@ -96,23 +96,24 @@ class BaseEnvironment(object):
         self._prev_score = 0.0
         self._world_bounding_box = world_bounding_box
         if engine is None:
-            from engines.unreal_cv_wrapper import UnrealCVWrapper
+            from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
             engine = UnrealCVWrapper()
         self._engine = engine
         if mapper is None:
-            from mapping.octomap_ext_mapper import OctomapExtMapper
+            from RLrecon.mapping.octomap_ext_mapper import OctomapExtMapper
             mapper = OctomapExtMapper()
         self._mapper = mapper
         self._clear_size = clear_size
-        self._action_map = action_map
+        self._action_list = action_list
         if update_map_flags is None:
-            update_map_flags = [True] * len(action_map)
+            update_map_flags = [True] * len(action_list)
         self._update_map_flags = update_map_flags
         if action_rewards is None:
-            action_rewards = [0.0] * len(action_map)
+            action_rewards = [0.0] * len(action_list)
         self._action_rewards = action_rewards
         self._action_not_allowed_reward = action_not_allowed_reward
-        self._action_not_valid_reward = DEFAULT_ACTION_NOT_VALID_REWARD
+        self._action_not_valid_reward = action_not_valid_reward
+        self._terminal_score_threshold = terminal_score_threshold
         self._filter_depth_map = filter_depth_map
         if use_ros:
             import rospy
@@ -124,11 +125,12 @@ class BaseEnvironment(object):
             self._use_ros = False
         self._score_bounding_box = score_bounding_box
 
-    def _update_pose(self, new_pose):
+    def _update_pose(self, new_pose, wait_until_set=False):
         """Update pose and publish with ROS"""
-        self._engine.set_location(new_pose._location)
-        roll, pitch, yaw = new_pose._orientation_rpy
-        self._engine.set_orientation_rpy(roll, pitch, yaw)
+        # self._engine.set_location(new_pose.location())
+        # roll, pitch, yaw = new_pose.orientation_rpy()
+        # self._engine.set_orientation_rpy(roll, pitch, yaw)
+        self._engine.set_pose_rpy((new_pose.location(), new_pose.orientation_rpy()), wait_until_set)
         self._publish_pose(new_pose)
 
     def _get_depth_point_cloud(self, pose):
@@ -145,15 +147,28 @@ class BaseEnvironment(object):
 
     def _update_map(self, pose):
         """Update map by taking a depth image and integrating it into the occupancy map"""
-        timer = Timer()
-        point_cloud = self._get_depth_point_cloud(pose)
-        t1 = timer.elapsed_seconds()
-        result = self._mapper.update_map_rpy(pose._location, pose._orientation_rpy, point_cloud)
-        t2 = timer.elapsed_seconds()
-        print("Timing of _update_map():")
-        print("  ", t1)
-        print("  ", t2 - t1)
-        print("Total: ", t2)
+        # # timer = Timer()
+        # point_cloud = self._get_depth_point_cloud(pose)
+        # # t1 = timer.elapsed_seconds()
+        # result = self._mapper.perform_insert_point_cloud_rpy(pose.location(), pose.orientation_rpy(), point_cloud)
+        # # t2 = timer.elapsed_seconds()
+
+        self._engine.set_pose(pose, wait_until_set=True)
+        intrinsics = np.zeros((3, 3))
+        intrinsics[0, 0] = self.get_focal_length()
+        intrinsics[1, 1] = intrinsics[0, 0]
+        intrinsics[0, 2] = float(self._engine.get_width()) / 2
+        intrinsics[1, 2] = float(self._engine.get_height()) / 2
+        depth_image = self._engine.get_depth_image()
+        downsample_to_grid = True
+        simulate = False
+        result = self._mapper.perform_insert_depth_map_rpy(pose.location(), pose.orientation_rpy(),
+                                                           depth_image, intrinsics, downsample_to_grid, simulate)
+
+        # print("Timing of _update_map():")
+        # print("  ", t1)
+        # print("  ", t2 - t1)
+        # print("Total: ", t2)
         return result.reward, result.normalized_score
 
     def _publish_pose(self, pose):
@@ -161,7 +176,7 @@ class BaseEnvironment(object):
         if self._use_ros:
             import rospy
             from geometry_msgs.msg import PoseStamped
-            import ros_utils
+            from RLrecon import ros_utils
             pose_msg = PoseStamped()
             pose_msg.header.frame_id = self._ros_world_frame
             pose_msg.header.stamp = rospy.Time.now()
@@ -174,12 +189,19 @@ class BaseEnvironment(object):
         """Return current observation of agent"""
         return pose
 
+    def get_engine(self):
+        return self._engine
+
     def get_mapper(self):
         return self._mapper
 
     def get_world_bounding_box(self):
         """Get world bounding box"""
         return self._world_bounding_box
+
+    def get_score_bounding_box(self):
+        """Get score bounding box"""
+        return self._score_bounding_box
 
     def get_action_not_allowed_reward(self):
         """Return reward for invalid action"""
@@ -208,49 +230,88 @@ class BaseEnvironment(object):
         orientation_quat = self._engine.get_orientation_quat()
         return orientation_quat
 
-    def set_pose(self, pose):
+    def set_pose(self, pose, wait_until_set=False):
         """Set new pose"""
-        self._update_pose(pose)
+        self._update_pose(pose, wait_until_set)
 
     def simulate_action_on_pose(self, pose, action_index):
         """Check if an action is allowed (i.e. no collision, inside bounding box)"""
-        valid, new_pose = self._action_map[action_index](pose)
+        valid, new_pose = self._action_list[action_index](pose)
         return new_pose
 
-    def is_action_allowed_on_pose(self, pose, action_index):
+    def is_action_colliding(self, pose, action_index, verbose=False):
         location = pose.location()
         new_pose = self.simulate_action_on_pose(pose, action_index)
         new_location = new_pose.location()
         if np.any(new_location < self._world_bounding_box.minimum()):
-            return False
+            if verbose:
+                print("World bbox collision")
+            return True
         if np.any(new_location > self._world_bounding_box.maximum()):
+            if verbose:
+                print("World bbox collision")
+            return True
+        if np.allclose(location, new_location):
+            # Pure rotations are always allowed
+            if verbose:
+                print("Pure rotation -> no collision")
             return False
+
+        obs_level = 1
+        obs_size = 3
+        res = self.get_mapper().perform_query_subvolume_rpy(
+            new_location, new_pose.orientation_rpy(),
+            obs_level, obs_size, obs_size, obs_size, axis_mode=0)
+        occupancies = np.asarray(res.occupancies)
+        observation_certainties = np.asarray(res.observation_certainties)
+        if np.any(occupancies > 0.3):
+            if verbose:
+                print("Collision because of occupancies")
+            return True
+        if np.any(observation_certainties < 0.3):
+            if verbose:
+                print("Collision because of observation certainties")
+            return True
+
         direction = new_location - location
-        rays = [self._mapper.Ray(location, direction)]
+        ray = self._mapper.Ray(location, direction)
+        rays = [ray]
         # TODO: Figure out what to do for collision safety. Here we just shoot a single ray.
         ignore_unknown_voxels = False
-        rr = self._mapper.perform_raycast(rays, ignore_unknown_voxels)
+        max_range = -1
+        rr = self._mapper.perform_raycast(rays, ignore_unknown_voxels=ignore_unknown_voxels,
+                                          max_range=max_range, only_in_score_bounding_box=True)
         point_cloud = self._mapper.convert_raycast_point_cloud_from_msg(rr.point_cloud)
         hit_distance = np.linalg.norm(point_cloud[0].xyz - location)
         move_distance = np.linalg.norm(new_location - location)
         assert(rr.num_hits_occupied + rr.num_hits_unknown <= 1)
         if hit_distance <= move_distance:
-            return False
-        else:
+            if verbose:
+                print("Collision because of raycast")
+                print("hit_distance:", hit_distance)
+                print("move_distance:", move_distance)
+                print("location:", pose.location())
+                print("xyz:", point_cloud[0].xyz)
+                print("occupancy:", point_cloud[0].occupancy)
+                print("observation_certainty:", point_cloud[0].observation_certainty)
+                print("is_surface:", point_cloud[0].is_surface)
+                print("is_known:", point_cloud[0].is_known)
             return True
+        else:
+            return False
 
-    def reset(self, pose=None, reset_map=True):
+    def is_action_allowed_on_pose(self, pose, action_index):
+        return self.is_action_colliding(pose, action_index)
+
+    def reset(self, pose=None, reset_map=True, keep_pose=False):
         """Initialize environment (basically clears a bounding box in the occupancy map)"""
         self._prev_score = 0.0
-        if pose is None:
+        if keep_pose or pose is None:
             pose = self.get_pose()
         else:
             self._update_pose(pose)
         if reset_map:
             self._mapper.perform_reset()
-        clear_bbox = math_utils.BoundingBox(
-            pose.location() - self._clear_size / 2.0,
-            pose.location() + self._clear_size / 2.0)
         bbox = math_utils.BoundingBox(
             np.array([-np.inf, -np.inf, -np.inf]),
             np.array([np.inf, np.inf, np.inf]))
@@ -262,21 +323,22 @@ class BaseEnvironment(object):
             self._mapper.perform_clear_bounding_box_voxels(bbox, densify=False)
             # self._mapper.perform_clear_bounding_box_voxels(bbox, densify=True)
             if self._score_bounding_box is not None:
-                self._mapper.perform_override_bounding_box_voxels(self._score_bounding_box, 0.5)
-            self._mapper.perform_clear_bounding_box_voxels(clear_bbox)
+                self._mapper.perform_override_bounding_box_voxels(self._score_bounding_box, 0.5, 0.0)
+            if self._clear_size > 0:
+                clear_bbox = math_utils.BoundingBox(
+                    pose.location() - self._clear_size / 2.0,
+                    pose.location() + self._clear_size / 2.0)
+                self._mapper.perform_clear_bounding_box_voxels(clear_bbox)
             # Only for debugging and visualization (RViz has problems showing free voxels)
-            # self._mapper.perform_override_bounding_box_voxels(clear_bbox, 0.8)
+            # self._mapper.perform_override_bounding_box_voxels(clear_bbox, 0.8, 0.0)
         if self._score_bounding_box is not None:
             self._mapper.perform_set_score_bounding_box(self._score_bounding_box)
+        observation = self._get_observation(pose)
+        return observation
 
-    def simulate_action_on_pose(self, pose, action_index):
-        """Simulate the effect of an action on a pose"""
-        new_pose = self._action_map[action_index](pose)
-        return new_pose
-
-    def num_actions(self):
+    def get_num_of_actions(self):
         """Get total number of actions"""
-        return len(self._action_map)
+        return len(self._action_list)
 
     def perform_action(self, action_index, pose=None):
         """Perform action by index"""
@@ -293,7 +355,7 @@ class BaseEnvironment(object):
             }
             return pose, self._action_not_allowed_reward, terminal, info
         # t2 = timer.elapsed_seconds()
-        valid, new_pose = self._action_map[action_index](pose)
+        valid, new_pose = self._action_list[action_index](pose)
         if not valid:
             terminal = False
             info = {
@@ -317,7 +379,7 @@ class BaseEnvironment(object):
         # print(t3 - t2)
         # print(t4 - t3)
         # print(t5 - t4)
-        terminal = score >= TERMINAL_SCORE_THRESHOLD
+        terminal = score >= self._terminal_score_threshold
         info = {
             "score": score,
         }
@@ -326,7 +388,7 @@ class BaseEnvironment(object):
 
     def get_action_name(self, action_index):
         """Get method name by action index"""
-        return self._action_map[action_index].__name__
+        return self._action_list[action_index].__name__
 
     def _move(self, pose, offset):
         """Perform global motion of the agent"""
@@ -339,15 +401,14 @@ class BaseEnvironment(object):
         quat = math_utils.convert_rpy_to_quat(pose.orientation_rpy())
         world_offset = math_utils.rotate_vector_with_quaternion(quat, local_offset)
         valid = True
-        return valid, self._move(pose, world_offset[:3])
+        return self._move(pose, world_offset[:3])
 
     def _move_local_without_pr(self, pose, local_offset):
         """Perform local motion in the agent frame (overriding pitch and roll to 0)"""
         rpy_without_pitch_roll = np.array([0, 0, pose.orientation_rpy()[2]])
         quat_without_pitch_roll = math_utils.convert_rpy_to_quat(rpy_without_pitch_roll)
         world_offset = math_utils.rotate_vector_with_quaternion(quat_without_pitch_roll, local_offset)
-        valid = True
-        return valid, self._move(pose, world_offset[:3])
+        return self._move(pose, world_offset[:3])
 
     def _rotate(self, pose, d_roll, d_pitch, d_yaw):
         """Perform rotation of the agent"""
@@ -376,19 +437,11 @@ class Environment(BaseEnvironment):
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  move_distance=2.0,
                  yaw_amount=math_utils.degrees_to_radians(180. / 10.),
                  pitch_amount=math_utils.degrees_to_radians(180. / 5.),
-                 action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -408,7 +461,7 @@ class Environment(BaseEnvironment):
         self._move_distance = move_distance
         self._yaw_amount = yaw_amount
         self._pitch_amount = pitch_amount
-        action_map = [
+        action_list = [
             # self.nop,
             self.move_left,
             self.move_right,
@@ -434,21 +487,13 @@ class Environment(BaseEnvironment):
             False,
         ]
         action_penalty = DEFAULT_ACTION_PENALTY
-        action_rewards = np.array([action_penalty] * len(action_map))
+        action_rewards = np.array([action_penalty] * len(action_list))
         super(Environment, self).__init__(
             world_bounding_box,
-            action_map,
+            action_list,
             update_map_flags=update_map_flags,
             action_rewards=action_rewards,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            **kwargs)
 
     def move_left(self, pose):
         """Perform local move left"""
@@ -515,24 +560,155 @@ class Environment(BaseEnvironment):
         return True
 
 
+class HorizontalEnvironment(Environment):
+
+    def __init__(self,
+                 world_bounding_box,
+                 random_reset=True,
+                 move_distance=2.0,
+                 yaw_amount=math_utils.degrees_to_radians(180. / 10.),
+                 # pitch_amount=math_utils.degrees_to_radians(180. / 5.),
+                 **kwargs):
+        """Initialize environment.
+
+        Args:
+            world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
+            engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
+            mapper: Occupancy mapper (i.e. OctomapExt interface).
+            move_distance (float): Scale of local motions.
+            yaw_amount (float): Scale of yaw rotations.
+            pitch_amount (float): Scale of pitch rotations.
+            action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
+            use_ros (bool): Whether to use ROS and publish on some topics.
+            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
+            ros_world_frame (str): If ROS is used this is the id of the world frame.
+        """
+
+        self._random_reset = random_reset
+        self._move_distance = move_distance
+        self._yaw_amount = yaw_amount
+        # self._pitch_amount = pitch_amount
+        action_list = [
+            # self.nop,
+            self.move_left,
+            self.move_right,
+            # self.move_down,
+            # self.move_up,
+            self.move_backward,
+            self.move_forward,
+            self.yaw_clockwise,
+            self.yaw_counter_clockwise,
+            self.yaw_turn_around,
+            # self.pitch_up,
+            # self.pitch_down,
+        ]
+        update_map_flags = [
+            True,
+            True,
+            # True,
+            # True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            # False,
+            # False,
+        ]
+        action_penalty = DEFAULT_ACTION_PENALTY
+        action_rewards = np.array([action_penalty] * len(action_list))
+        super(Environment, self).__init__(
+            world_bounding_box,
+            action_list,
+            update_map_flags=update_map_flags,
+            action_rewards=action_rewards,
+            **kwargs)
+
+    def _get_origin_angle(self, location):
+        theta = np.arctan2(location[1], location[0])
+        return theta
+
+    def move_left(self, pose):
+        """Perform local move left"""
+        return self._move_local_without_pr(pose, np.array([0, +self._move_distance, 0]))
+
+    def move_right(self, pose):
+        """Perform local move right"""
+        return self._move_local_without_pr(pose, np.array([0, -self._move_distance, 0]))
+
+    def move_down(self, pose):
+        """Perform local move down"""
+        return self._move_local_without_pr(pose, np.array([0, 0, -self._move_distance]))
+
+    def move_up(self, pose):
+        """Perform local move up"""
+        return self._move_local_without_pr(pose, np.array([0, 0, +self._move_distance]))
+
+    def move_backward(self, pose):
+        """Perform local move backward"""
+        return self._move_local_without_pr(pose, np.array([-self._move_distance, 0, 0]))
+
+    def move_forward(self, pose):
+        """Perform local move forward"""
+        return self._move_local_without_pr(pose, np.array([+self._move_distance, 0, 0]))
+
+    def yaw_clockwise(self, pose):
+        """Perform yaw rotation clockwise"""
+        return self._rotate(pose, 0, 0, -self._yaw_amount)
+
+    def yaw_counter_clockwise(self, pose):
+        """Perform yaw rotation counter-clockwise"""
+        return self._rotate(pose, 0, 0, +self._yaw_amount)
+
+    def yaw_turn_around(self, pose):
+        """Perform yaw rotation around 180 degrees"""
+        return self._rotate(pose, 0, 0, np.pi)
+
+    #TODO: Fix random placement
+    def reset(self, **kwargs):
+        """Resets the environment."""
+        valid_location = False
+        center_location = 0.5 * (self.get_world_bounding_box().maximum() + self.get_world_bounding_box().minimum())
+        location_range = self.get_world_bounding_box().maximum() - self.get_world_bounding_box().minimum()
+        min_location = center_location - 0.5 * location_range
+        while not valid_location:
+            location = min_location + np.random.rand(3) * location_range
+            location[2] = 3.0
+            # valid_location = np.linalg.norm(location) >= 8
+            valid_location = not self.get_score_bounding_box().contains(location)
+            if not valid_location:
+                print("Sampled invalid reset location: {}".format(location))
+                print("World bounding box: {}".format(self.get_world_bounding_box()))
+                print("Score bounding box: {}".format(self.get_score_bounding_box()))
+        theta = self._get_origin_angle(location)
+        roll = 0
+        pitch = 0
+        if self._random_reset:
+            # yaw = 2 * np.pi * np.random.rand()
+            u = 2 * (np.random.rand() - 0.5)
+            yaw = theta + np.pi + u * np.pi / 8.
+        else:
+            yaw = 0
+        orientation_rpy = np.array([roll, pitch, yaw])
+        pose = self.Pose(location, orientation_rpy)
+        super(Environment, self).reset(pose, **kwargs)
+
+    # # TODO: Make proper collision detection
+    def is_action_allowed_on_pose(self, pose, action_index):
+        return True
+
+
 class SimpleV0Environment(BaseEnvironment):
     """SimpleV0Environment adds simple orbital motion actions to BaseEnvironment."""
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  radius=7.0,
                  height=3.0,
                  angle_amount=math_utils.degrees_to_radians(180. / 10.),
                  action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -555,7 +731,7 @@ class SimpleV0Environment(BaseEnvironment):
         self._radius = radius
         self._height = height
         self._angle_amount = angle_amount
-        action_map = [
+        action_list = [
             self.orbit_clockwise,
             self.orbit_counter_clockwise,
         ]
@@ -564,21 +740,13 @@ class SimpleV0Environment(BaseEnvironment):
             True,
         ]
         action_penalty = DEFAULT_ACTION_PENALTY
-        action_rewards = np.array([action_penalty] * len(action_map))
+        action_rewards = np.array([action_penalty] * len(action_list))
         super(SimpleV0Environment, self).__init__(
             world_bounding_box,
-            action_map,
+            action_list,
             update_map_flags=update_map_flags,
             action_rewards=action_rewards,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            **kwargs)
 
     def _get_orbit_angle(self, pose):
         theta = np.arctan2(pose.location()[1], pose.location()[0])
@@ -634,20 +802,12 @@ class SimpleV1Environment(BaseEnvironment):
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  radius=7.0,
                  height=3.0,
                  angle_amount=math_utils.degrees_to_radians(180. / 10.),
                  yaw_amount=math_utils.degrees_to_radians(180. / 10.),
-                 action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -671,7 +831,7 @@ class SimpleV1Environment(BaseEnvironment):
         self._height = height
         self._angle_amount = angle_amount
         self._yaw_amount = yaw_amount
-        action_map = [
+        action_list = [
             self.orbit_clockwise,
             self.orbit_counter_clockwise,
             self.orbit_clockwise_yaw_clockwise,
@@ -703,18 +863,8 @@ class SimpleV1Environment(BaseEnvironment):
         ])
         super(SimpleV1Environment, self).__init__(
             world_bounding_box,
-            action_map,
-            update_map_flags=update_map_flags,
-            action_rewards=action_rewards,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            action_list,
+            **kwargs)
 
     def _get_orbit_angle(self, pose):
         theta = np.arctan2(pose.location()[1], pose.location()[0])
@@ -805,20 +955,12 @@ class SimpleV2Environment(BaseEnvironment):
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  radius=7.0,
                  height=3.0,
                  angle_amount=math_utils.degrees_to_radians(180. / 8.),
                  yaw_amount=math_utils.degrees_to_radians(180. / 8.),
-                 action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -842,7 +984,7 @@ class SimpleV2Environment(BaseEnvironment):
         self._height = height
         self._angle_amount = angle_amount
         self._yaw_amount = yaw_amount
-        action_map = [
+        action_list = [
             self.orbit_clockwise,
             self.orbit_counter_clockwise,
             self.yaw_clockwise,
@@ -862,18 +1004,8 @@ class SimpleV2Environment(BaseEnvironment):
         ])
         super(SimpleV2Environment, self).__init__(
             world_bounding_box,
-            action_map,
-            update_map_flags=update_map_flags,
-            action_rewards=action_rewards,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            action_list,
+            **kwargs)
 
     def _get_orbit_angle(self, pose):
         theta = np.arctan2(pose.location()[1], pose.location()[0])
@@ -944,21 +1076,13 @@ class SimpleV3Environment(BaseEnvironment):
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  radius=15.0,
                  height=5.0,
                  angle_amount=math_utils.degrees_to_radians(180. / 10.),
                  yaw_amount=math_utils.degrees_to_radians(180. / 10.),
                  pitch_amount=math_utils.degrees_to_radians(180. / 5.),
-                 action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -984,7 +1108,7 @@ class SimpleV3Environment(BaseEnvironment):
         self._angle_amount = angle_amount
         self._yaw_amount = yaw_amount
         self._pitch_amount = pitch_amount
-        action_map = [
+        action_list = [
             self.orbit_clockwise,
             self.orbit_counter_clockwise,
             self.yaw_clockwise,
@@ -1001,21 +1125,11 @@ class SimpleV3Environment(BaseEnvironment):
             False,
         ]
         action_penalty = DEFAULT_ACTION_PENALTY
-        action_rewards = np.array([action_penalty] * len(action_map))
+        action_rewards = np.array([action_penalty] * len(action_list))
         super(SimpleV3Environment, self).__init__(
             world_bounding_box,
-            action_map,
-            update_map_flags=update_map_flags,
-            action_rewards = action_rewards,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            action_list,
+            **kwargs)
 
     def _get_orbit_angle(self, pose):
         theta = np.arctan2(pose.location()[1], pose.location()[0])
@@ -1090,19 +1204,11 @@ class VerySimpleEnvironment(BaseEnvironment):
 
     def __init__(self,
                  world_bounding_box,
-                 engine=None,
-                 mapper=None,
-                 clear_size=6.0,
                  random_reset=True,
                  radius=15.0,
                  height=5.0,
                  angle_amount=math_utils.degrees_to_radians(180. / 10.),
-                 action_not_allowed_reward=-100.,
-                 filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
-                 score_bounding_box=None):
+                 **kwargs):
         """Initialize environment.
 
         Args:
@@ -1124,22 +1230,14 @@ class VerySimpleEnvironment(BaseEnvironment):
         self._radius = radius
         self._height = height
         self._angle_amount = angle_amount
-        action_map = [
+        action_list = [
             self.orbit_clockwise,
             self.orbit_counter_clockwise
         ]
         super(VerySimpleEnvironment, self).__init__(
             world_bounding_box,
-            action_map,
-            engine=engine,
-            mapper=mapper,
-            clear_size=clear_size,
-            action_not_allowed_reward=action_not_allowed_reward,
-            filter_depth_map=filter_depth_map,
-            use_ros=use_ros,
-            ros_pose_topic=ros_pose_topic,
-            ros_world_frame=ros_world_frame,
-            score_bounding_box=score_bounding_box)
+            action_list,
+            **kwargs)
 
     def _get_orbit_angle(self, pose):
         theta = np.arctan2(pose.location()[1], pose.location()[0])

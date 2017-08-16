@@ -171,26 +171,12 @@ class BaseEngine(object):
         self.set_orientation_rpy(roll, pitch, yaw)
         focal_length = self.get_focal_length()
         # t1 = timer.elapsed_seconds()
-        # TODO: Seems to be unnecessary now.
-        # Make sure that the new frame is rendered.
-        # This should be fixed in the UnrealCV plugin.
-        # TODO: Seems to be unnecessary now.
-        # quat = math_utils.convert_rpy_to_quat(orientation_rpy)
-        # max_delay_time = 2.0
-        # t0 = time.time()
-        # t2 = timer.elapsed_seconds()
-        # while time.time() - t0 < max_delay_time:
-        #     if math_utils.is_vector_equal(location, self.get_location(), tolerance=1e-4) \
-        #             and math_utils.is_equal_quaternion(quat, self.get_orientation_quat(), tolerance=1e-4):
-        #         break
-        #     time.sleep(0.01)
-        # t3 = timer.elapsed_seconds()
-        # TODO: Seems to be unnecessary now.
-        # After the pose was successfully updated, wait a little bit longer.
-        # time.sleep(0.1)
-        # t1 = time.time()
-        # print("delay={}".format(t1 - t0))
         depth_image = self.get_depth_image()
+        # Show depth image. Only for debugging.
+        # import cv2
+        # cv2.imshow("depth image", depth_image / 30.)
+        # # cv2.imshow("depth image", depth_image / np.max(depth_image.flatten()))
+        # cv2.waitKey(10)
         # t4 = timer.elapsed_seconds()
         rospy.logdebug("Depth image: min={}, max={}".format(
             np.min(depth_image.flatten()), np.max(depth_image.flatten())))
@@ -213,7 +199,7 @@ class BaseEngine(object):
             # cv2.imshow('depth', depth_image_show)
             # cv2.waitKey(10)
         # Create pointcloud message
-        rospy.loginfo("Creating point cloud message")
+        rospy.logdebug("Creating point cloud message")
         points = self._create_points_from_depth_image(depth_image, focal_length)
         # t8 = timer.elapsed_seconds()
         # print("Timing of get_depth_point_cloud_rpy():")

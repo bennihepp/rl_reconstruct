@@ -4,15 +4,15 @@ import rospy
 from RLrecon import math_utils
 from RLrecon.engines.dummy_engine import DummyEngine
 from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
-from RLrecon.environments.environment import SimpleV1Environment
+from RLrecon.environments.environment import SimpleV0Environment
 from gym import spaces
 
 
-class RLreconSimpleV1Env(gym.Env):
+class RLreconSimpleV0Env(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self):
-        super(RLreconSimpleV1Env, self).__init__()
+        super(RLreconSimpleV0Env, self).__init__()
         rospy.init_node('gym_RLrecon_simple_node', anonymous=False)
         world_bounding_box = math_utils.BoundingBox(
             [-20, -20,   0],
@@ -23,7 +23,7 @@ class RLreconSimpleV1Env(gym.Env):
             [+3, +3, +5]
         )
         engine = DummyEngine()
-        self._environment = SimpleV1Environment(
+        self._environment = SimpleV0Environment(
             world_bounding_box, engine=engine, random_reset=True,
             clear_size=6.0, filter_depth_map=False,
             score_bounding_box=score_bounding_box)
@@ -33,16 +33,14 @@ class RLreconSimpleV1Env(gym.Env):
         #     1.0,
         #     shape=self._environment.observation_shape()
         # )
-        # self._obs_level = 3
-        # self._obs_size_x = 16
-        self._obs_level = 4
-        self._obs_size_x = 8
+        self._obs_level = 3
+        self._obs_size_x = 16
         self._obs_size_y = self._obs_size_x
         self._obs_size_z = self._obs_size_x
         self.observation_space = spaces.Box(
             0.0,
             1.0,
-            shape=(self._obs_size_x, self._obs_size_y, self._obs_size_z, 2)
+            shape=(self._obs_size_x, self._obs_size_y, self._obs_size_z, 1)
         )
         self.observation_space = spaces.Box(
             -1000,
@@ -56,7 +54,6 @@ class RLreconSimpleV1Env(gym.Env):
         engine = UnrealCVWrapper(
             address=address,
             port=port,
-            image_scale_factor=0.25,
             max_depth_viewing_angle=math_utils.degrees_to_radians(70.))
         self._environment._engine = engine
 
@@ -78,7 +75,6 @@ class RLreconSimpleV1Env(gym.Env):
         observation_certainties = np.asarray(res.observation_certainties, dtype=np.float32)
         observation_certainties_3d = np.reshape(observation_certainties, (size_x, size_y, size_z))
         grid_3d = np.stack([occupancies_3d, observation_certainties_3d], axis=-1)
-        # occupancies_3d = np.reshape(occupancies, (size_x, size_y, size_z, 1))
         location = self._environment.get_location()
         # orientation_rpy = self._environment.get_orientation_rpy()
         orientation_quat = self._environment.get_orientation_quat()

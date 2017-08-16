@@ -46,14 +46,14 @@ def get_in_grid_3d_normalization(input_stats_filename, filenames=None):
         if not np.all(np.abs(mean_z_score) < 1e-2):
             print("mean_z_score")
             print(mean_z_score)
-            print(mean_z_score[np.abs(mean_z_score - 1) >= 1e-2])
-            print(np.sum(np.abs(mean_z_score - 1) >= 1e-2))
+            print(mean_z_score[np.abs(mean_z_score) >= 1e-2])
+            print(np.sum(np.abs(mean_z_score) >= 1e-2))
+            print(np.max(np.abs(mean_z_score)))
         assert(np.all(np.abs(mean_z_score) < 1e-3))
-        if not np.all(np.abs(stddev_z_score - 1) < 1e-2):
+        if np.any(np.abs(stddev_z_score - 1) < 1e-2):
             print("stddev_z_score")
             print(stddev_z_score)
             print(stddev_z_score[np.abs(stddev_z_score - 1) >= 1e-2])
-            print(stddev_z_score[np.abs(stddev_z_score - 1) >= 1e-2] < 1e-2)
             print(np.sum(np.abs(stddev_z_score - 1) >= 1e-2))
             print(np.max(np.abs(stddev_z_score - 1)))
         assert(np.all(np.abs(stddev_z_score - 1) < 1e-2))
@@ -84,7 +84,7 @@ def get_input_from_record_fn(config, subvolume_slices, in_grid_3d_shape,
     if config.input_id == "in_grid_3d":
         # Determine channels to use
         if config.obs_levels_to_use is None:
-            in_grid_3d_channels = range(in_grid_3d_shape)
+            in_grid_3d_channels = range(in_grid_3d_shape[-1])
         else:
             obs_levels_to_use = [int(x) for x in config.obs_levels_to_use.split(',')]
             in_grid_3d_channels = []
@@ -307,7 +307,7 @@ def get_input_and_target_from_record_functions(config, filenames, verbose=False)
         print("Subvolume slice x: {}".format(subvolume_slice_x))
         print("subvolume slice y: {}".format(subvolume_slice_y))
         print("subvolume slice z: {}".format(subvolume_slice_z))
-        print("Input id: {}".format(config.target_id))
+        print("Input id: {}".format(config.input_id))
         print("Target id: {}".format(config.target_id))
 
     if config.normalize_input:

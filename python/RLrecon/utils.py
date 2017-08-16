@@ -1,4 +1,10 @@
+import sys
 import time
+
+
+def print_debug(variable_name):
+    frame = sys._getframe(1)
+    print("{}={}".format(variable_name, eval(variable_name, frame.f_globals, frame.f_locals)))
 
 
 class Timer(object):

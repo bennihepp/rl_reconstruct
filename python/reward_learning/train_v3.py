@@ -19,6 +19,8 @@ import tensorflow.contrib.memory_stats as tf_memory_stats
 import tf_utils
 import data_provider
 import input_pipeline
+import configuration
+from utils import argparse_bool
 from attribute_dict import AttributeDict
 from tensorflow.python.client import timeline
 from RLrecon.utils import Timer
@@ -46,87 +48,31 @@ def save_model(sess, saver, store_path, global_step_tf, max_trials, retry_save_w
                 raise
 
 
-def update_config_from_cmdline(config, args):
-    if "tensorflow" not in config:
-        config["tensorflow"] = {}
-    config["tensorflow"]["gpu_ids"] = args.gpu_ids
-    config["tensorflow"]["strict_devices"] = args.strict_devices
-    config["tensorflow"]["multi_gpu_ps_id"] = args.multi_gpu_ps_id
-    config["tensorflow"]["gpu_memory_fraction"] = args.gpu_memory_fraction
-    config["tensorflow"]["intra_op_parallelism"] = args.intra_op_parallelism
-    config["tensorflow"]["inter_op_parallelism"] = args.inter_op_parallelism
-    config["tensorflow"]["cpu_train_queue_capacity"] = args.cpu_train_queue_capacity
-    config["tensorflow"]["cpu_test_queue_capacity"] = args.cpu_test_queue_capacity
-    config["tensorflow"]["cpu_train_queue_min_after_dequeue"] = args.cpu_train_queue_min_after_dequeue
-    config["tensorflow"]["cpu_test_queue_min_after_dequeue"] = args.cpu_test_queue_min_after_dequeue
-    config["tensorflow"]["cpu_train_queue_threads"] = args.cpu_train_queue_threads
-    config["tensorflow"]["cpu_test_queue_threads"] = args.cpu_test_queue_threads
-    config["tensorflow"]["log_device_placement"] = args.log_device_placement
-    config["tensorflow"]["create_tf_timeline"] = args.create_tf_timeline
-    if "io" not in config:
-        config["io"] = {}
-    config["io"]["async_timeout"] = args.async_timeout
-    config["io"]["validation_interval"] = args.validation_interval
-    config["io"]["train_summary_interval"] = args.train_summary_interval
-    config["io"]["model_summary_interval"] = args.model_summary_interval
-    config["io"]["model_summary_num_batches"] = args.model_summary_num_batches
-    config["io"]["checkpoint_interval"] = args.checkpoint_interval
-    config["io"]["keep_checkpoint_every_n_hours"] = args.keep_checkpoint_every_n_hours
-    config["io"]["keep_n_last_checkpoints"] = args.keep_n_last_checkpoints
-    config["io"]["max_checkpoint_save_trials"] = args.max_checkpoint_save_trials
-    if "training" not in config:
-        config["training"] = {}
-    config["training"]["num_epochs"] = args.num_epochs
-    config["training"]["batch_size"] = args.batch_size
-    config["training"]["optimizer"] = args.optimizer
-    config["training"]["max_grad_global_norm"] = args.max_grad_global_norm
-    config["training"]["initial_learning_rate"] = args.initial_learning_rate
-    config["training"]["learning_rate_decay_epochs"] = args.learning_rate_decay_epochs
-    config["training"]["learning_rate_decay_rate"] = args.learning_rate_decay_rate
-    config["training"]["learning_rate_decay_staircase"] = args.learning_rate_decay_staircase
-    if "data" not in config:
-        config["data"] = {}
-    config["data"]["train_test_split_ratio"] = args.train_test_split_ratio
-    config["data"]["train_test_split_shuffle"] = args.train_test_split_shuffle
-    config["data"]["max_num_train_files"] = args.max_num_train_files
-    config["data"]["max_num_test_files"] = args.max_num_test_files
-    config["data"]["fake_constant_data"] = args.fake_constant_data
-    config["data"]["fake_random_data"] = args.fake_random_data
-    config["data"]["input_id"] = args.input_id
-    config["data"]["target_id"] = args.target_id
-    config["data"]["input_stats_filename"] = args.input_stats_filename
-    config["data"]["obs_levels_to_use"] = args.obs_levels_to_use
-    config["data"]["subvolume_slice_x"] = args.subvolume_slice_x
-    config["data"]["subvolume_slice_y"] = args.subvolume_slice_y
-    config["data"]["subvolume_slice_z"] = args.subvolume_slice_z
-    config["data"]["normalize_input"] = args.normalize_input
-    config["data"]["normalize_target"] = args.normalize_target
-    return config
-
-
 def run(args):
     # Read config file
-    if args.config is None:
-        cfg = {}
-        update_config_from_cmdline(cfg, args)
-    else:
+    topic_cmdline_mappings = {"tensorflow": "tf"}
+    topics = ["tensorflow", "io", "training", "data"]
+    cfg = configuration.get_config_from_cmdline(
+        args, topics, topic_cmdline_mappings)
+    if args.config is not None:
         with file(args.config, "r") as config_file:
-            cfg = yaml.load(config_file)
-    # TODO: Make command line override file config
+            tmp_cfg = yaml.load(config_file)
+            configuration.update_config_from_other(cfg, tmp_cfg)
 
     # Read model config
     if "model" in cfg:
         model_config = cfg["model"]
-        if args.model_config is None:
-            print("ERROR: Model configuration must be in general config file or provided in extra config file.")
-            import sys
-            sys.exit(1)
-    else:
+    elif args.model_config is not None:
         model_config = {}
+    else:
+        print("ERROR: Model configuration must be in general config file or provided in extra config file.")
+        import sys
+        sys.exit(1)
 
-    with file(args.model_config, "r") as config_file:
-        tmp_model_config = yaml.load(config_file)
-        model_config.update(tmp_model_config)
+    if args.model_config is not None:
+        with file(args.model_config, "r") as config_file:
+            tmp_model_config = yaml.load(config_file)
+            configuration.update_config_from_other(model_config, tmp_model_config)
 
     cfg = AttributeDict.convert_deep(cfg)
     model_config = AttributeDict.convert_deep(model_config)
@@ -164,6 +110,13 @@ def run(args):
             test_filename_generator = file_helpers.input_filename_generator_hdf5(args.test_data_path)
             test_filenames = list(test_filename_generator)
         all_filenames = train_filenames + test_filenames
+    # Write train test split to model storage path
+    with file(os.path.join(args.store_path, "train_filenames"), "w") as fout:
+        for filename in train_filenames:
+            fout.write("{}\n".format(os.path.basename(filename)))
+    with file(os.path.join(args.store_path, "test_filenames"), "w") as fout:
+        for filename in test_filenames:
+            fout.write("{}\n".format(os.path.basename(filename)))
 
     if len(train_filenames) == 0:
         raise RuntimeError("No train dataset file")
@@ -189,7 +142,7 @@ def run(args):
     if not cfg.data.input_stats_filename:
         cfg.data.input_stats_filename = os.path.join(args.data_path, file_helpers.DEFAULT_HDF5_STATS_FILENAME)
     input_shape, get_input_from_record, target_shape, get_target_from_record = \
-        input_pipeline.get_input_and_target_from_record_functions(cfg.data, all_filenames, args.verbose)
+        input_pipeline.get_input_and_target_from_record_functions(cfg.data, all_filenames, verbose=True)
 
     if args.verbose:
         input_pipeline.print_data_stats(all_filenames[0], get_input_from_record, get_target_from_record)
@@ -279,7 +232,7 @@ def run(args):
             cfg.tensorflow.cpu_train_queue_min_after_dequeue,
             shuffle=True,
             num_threads=cfg.tensorflow.cpu_train_queue_threads,
-            timeout=cfg.io.async_timeout,
+            timeout=cfg.io.timeout,
             fake_constant_data=cfg.data.fake_constant_data,
             fake_random_data=cfg.data.fake_random_data,
             name="train",
@@ -291,7 +244,7 @@ def run(args):
             cfg.tensorflow.cpu_test_queue_min_after_dequeue,
             shuffle=False,
             num_threads=cfg.tensorflow.cpu_test_queue_threads,
-            timeout=cfg.io.async_timeout,
+            timeout=cfg.io.timeout,
             fake_constant_data=cfg.data.fake_constant_data,
             fake_random_data=cfg.data.fake_random_data,
             name="test",
@@ -431,7 +384,8 @@ def run(args):
                 train_model_hist_summary = get_model_hist_summary(train_input_pipeline, train_model)
 
     saver = tf.train.Saver(max_to_keep=cfg.io.keep_n_last_checkpoints,
-                           keep_checkpoint_every_n_hours=cfg.io.keep_checkpoint_every_n_hours)
+                           keep_checkpoint_every_n_hours=cfg.io.keep_checkpoint_every_n_hours,
+                           save_relative_paths=True)
 
     try:
         train_input_pipeline.start()
@@ -655,7 +609,7 @@ def run(args):
             print("Current learning rate: {:e}".format(learning_rate))
 
             if cfg.io.validation_interval > 0 \
-                    and (epoch + 1) % cfg.io.validation_interval == 0:
+                    and epoch % cfg.io.validation_interval == 0:
                 # Perform validation
                 total_loss_value = 0.0
                 total_loss_min = +np.finfo(np.float32).max
@@ -705,19 +659,11 @@ def run(args):
     finally:
         print("Requesting stop")
         coord.request_stop()
-        coord.join(custom_threads, stop_grace_period_secs=cfg.io.async_timeout)
+        coord.join(custom_threads, stop_grace_period_secs=cfg.io.timeout)
 
 
 if __name__ == '__main__':
     np.set_printoptions(threshold=5)
-
-    def argparse_bool(v):
-        if v.lower() in ('yes', 'true', 't', 'y', '1'):
-            return True
-        elif v.lower() in ('no', 'false', 'f', 'n', '0'):
-            return False
-        else:
-            raise argparse.ArgumentTypeError('Boolean value expected.')
 
     parser = argparse.ArgumentParser(description=None)
     parser.add_argument('-v', '--verbose', action='count', dest='verbose', default=0, help='Set verbosity level.')
@@ -727,85 +673,68 @@ if __name__ == '__main__':
     parser.add_argument('--log-path', required=False, help='Log path.')
     parser.add_argument('--restore', type=argparse_bool, default=False, help='Whether to restore existing model.')
     parser.add_argument('--config', type=str, help='YAML configuration file.')
-    parser.add_argument('--model-config', type=str, required=True, help='YAML description of model.')
+    parser.add_argument('--model-config', type=str, help='YAML description of model.')
 
     # Report and checkpoint saving
-    parser.add_argument('--async_timeout', type=int, default=10 * 60)
-    parser.add_argument('--validation_interval', type=int, default=10)
-    parser.add_argument('--train_summary_interval', type=int, default=10)
-    parser.add_argument('--model_summary_interval', type=int, default=10)
-    parser.add_argument('--model_summary_num_batches', type=int, default=50)
-    parser.add_argument('--checkpoint_interval', type=int, default=50)
-    parser.add_argument('--keep_checkpoint_every_n_hours', type=float, default=2)
-    parser.add_argument('--keep_n_last_checkpoints', type=int, default=5)
-    parser.add_argument('--max_checkpoint_save_trials', type=int, default=5)
+    parser.add_argument('--io.timeout', type=int, default=10 * 60)
+    parser.add_argument('--io.validation_interval', type=int, default=10)
+    parser.add_argument('--io.train_summary_interval', type=int, default=10)
+    parser.add_argument('--io.model_summary_interval', type=int, default=10)
+    parser.add_argument('--io.model_summary_num_batches', type=int, default=50)
+    parser.add_argument('--io.checkpoint_interval', type=int, default=50)
+    parser.add_argument('--io.keep_checkpoint_every_n_hours', type=float, default=1)
+    parser.add_argument('--io.keep_n_last_checkpoints', type=int, default=5)
+    parser.add_argument('--io.max_checkpoint_save_trials', type=int, default=5)
 
     # Resource allocation and Tensorflow configuration
-    parser.add_argument('--gpu_ids', type=str,
+    parser.add_argument('--tf.gpu_ids', type=str,
                         help='GPU to be used (-1 for CPU). Comma separated list for multiple GPUs')
-    parser.add_argument('--strict_devices', type=argparse_bool, default=False,
+    parser.add_argument('--tf.strict_devices', type=argparse_bool, default=False,
                         help='Should the user be prompted to use fewer devices instead of failing.')
-    parser.add_argument('--multi_gpu_ps_id', type=int, help='Device to use as parameter server in Multi GPU mode')
-    parser.add_argument('--gpu_memory_fraction', type=float, default=0.75)
-    parser.add_argument('--intra_op_parallelism', type=int, default=1)
-    parser.add_argument('--inter_op_parallelism', type=int, default=4)
-    parser.add_argument('--cpu_train_queue_capacity', type=int, default=1024 * 8)
-    parser.add_argument('--cpu_test_queue_capacity', type=int, default=1024 * 8)
-    parser.add_argument('--cpu_train_queue_min_after_dequeue', type=int, default=2000)
-    parser.add_argument('--cpu_test_queue_min_after_dequeue', type=int, default=0)
-    parser.add_argument('--cpu_train_queue_threads', type=int, default=4)
-    parser.add_argument('--cpu_test_queue_threads', type=int, default=1)
-    parser.add_argument('--log_device_placement', type=argparse_bool, default=False,
+    parser.add_argument('--tf.multi_gpu_ps_id', type=int, help='Device to use as parameter server in Multi GPU mode')
+    parser.add_argument('--tf.gpu_memory_fraction', type=float, default=0.75)
+    parser.add_argument('--tf.intra_op_parallelism', type=int, default=1)
+    parser.add_argument('--tf.inter_op_parallelism', type=int, default=4)
+    parser.add_argument('--tf.cpu_train_queue_capacity', type=int, default=1024 * 8)
+    parser.add_argument('--tf.cpu_test_queue_capacity', type=int, default=1024 * 8)
+    parser.add_argument('--tf.cpu_train_queue_min_after_dequeue', type=int, default=2000)
+    parser.add_argument('--tf.cpu_test_queue_min_after_dequeue', type=int, default=0)
+    parser.add_argument('--tf.cpu_train_queue_threads', type=int, default=4)
+    parser.add_argument('--tf.cpu_test_queue_threads', type=int, default=1)
+    parser.add_argument('--tf.log_device_placement', type=argparse_bool, default=False,
                         help="Report where operations are placed.")
-    parser.add_argument('--create_tf_timeline', type=argparse_bool, default=False,
+    parser.add_argument('--tf.create_tf_timeline', type=argparse_bool, default=False,
                         help="Generate tensorflow trace.")
 
-    # Train test split
-    parser.add_argument('--train_test_split_ratio', type=float, default=4.0)
-    parser.add_argument('--train_test_split_shuffle', type=argparse_bool, default=False)
-    parser.add_argument('--max_num_train_files', type=int, default=-1)
-    parser.add_argument('--max_num_test_files', type=int, default=-1)
-    parser.add_argument('--fake_constant_data', type=argparse_bool, default=False,
-                        help='Use constant fake data.')
-    parser.add_argument('--fake_random_data', type=argparse_bool, default=False,
-                        help='Use constant fake random data.')
-
     # Learning parameters
-    parser.add_argument('--num_epochs', type=int, default=10000)
-    parser.add_argument('--batch_size', type=int, default=64)
-    parser.add_argument('--optimizer', type=str, default="adam")
-    parser.add_argument('--max_grad_global_norm', type=float, default=1e3)
-    parser.add_argument('--initial_learning_rate', type=float, default=1e-3)
-    parser.add_argument('--learning_rate_decay_epochs', type=int, default=10)
-    parser.add_argument('--learning_rate_decay_rate', type=float, default=0.96)
-    parser.add_argument('--learning_rate_decay_staircase', type=argparse_bool, default=False)
+    parser.add_argument('--training.num_epochs', type=int, default=10000)
+    parser.add_argument('--training.batch_size', type=int, default=64)
+    parser.add_argument('--training.optimizer', type=str, default="adam")
+    parser.add_argument('--training.max_grad_global_norm', type=float, default=1e3)
+    parser.add_argument('--training.initial_learning_rate', type=float, default=1e-3)
+    parser.add_argument('--training.learning_rate_decay_epochs', type=int, default=10)
+    parser.add_argument('--training.learning_rate_decay_rate', type=float, default=0.96)
+    parser.add_argument('--training.learning_rate_decay_staircase', type=argparse_bool, default=False)
 
+    # Train test split
+    parser.add_argument('--data.train_test_split_ratio', type=float, default=4.0)
+    parser.add_argument('--data.train_test_split_shuffle', type=argparse_bool, default=False)
+    parser.add_argument('--data.max_num_train_files', type=int, default=-1)
+    parser.add_argument('--data.max_num_test_files', type=int, default=-1)
     # Data parameters
-    parser.add_argument('--input_id', type=str, default="in_grid_3d")
-    parser.add_argument('--target_id', type=str, default="prob_rewards")
-    parser.add_argument('--input_stats_filename', type=str)
-    parser.add_argument('--obs_levels_to_use', type=str)
-    parser.add_argument('--subvolume_slice_x', type=str)
-    parser.add_argument('--subvolume_slice_y', type=str)
-    parser.add_argument('--subvolume_slice_z', type=str)
-    parser.add_argument('--normalize_input', type=argparse_bool, default=True)
-    parser.add_argument('--normalize_target', type=argparse_bool, default=False)
-
-    # # Model parameters
-    # parser.add_argument('--num_convs_per_block', type=int, default=2)
-    # parser.add_argument('--initial_num_filters', type=int, default=8)
-    # parser.add_argument('--filter_increase_per_block', type=int, default=8)
-    # parser.add_argument('--filter_increase_within_block', type=int, default=0)
-    # parser.add_argument('--maxpool_after_each_block', type=argparse_bool, default=True)
-    # parser.add_argument('--max_num_blocks', type=int, default=-1)
-    # parser.add_argument('--max_output_grid_size', type=int, default=8)
-    # parser.add_argument('--dropout_rate', type=float, default=0.5)
-    # parser.add_argument('--add_bias_3dconv', type=argparse_bool, default=False)
-    # parser.add_argument('--use_batch_norm_3dconv', type=argparse_bool, default=False)
-    # parser.add_argument('--use_batch_norm_regression', type=argparse_bool, default=False)
-    # parser.add_argument('--activation_fn_3dconv', type=str, default="relu")
-    # parser.add_argument('--num_units_regression', type=str, default="1024")
-    # parser.add_argument('--activation_fn_regression', type=str, default="relu")
+    parser.add_argument('--data.input_id', type=str, default="in_grid_3d")
+    parser.add_argument('--data.target_id', type=str, default="prob_reward")
+    parser.add_argument('--data.input_stats_filename', type=str)
+    parser.add_argument('--data.obs_levels_to_use', type=str)
+    parser.add_argument('--data.subvolume_slice_x', type=str)
+    parser.add_argument('--data.subvolume_slice_y', type=str)
+    parser.add_argument('--data.subvolume_slice_z', type=str)
+    parser.add_argument('--data.normalize_input', type=argparse_bool, default=True)
+    parser.add_argument('--data.normalize_target', type=argparse_bool, default=False)
+    parser.add_argument('--data.fake_constant_data', type=argparse_bool, default=False,
+                        help='Use constant fake data.')
+    parser.add_argument('--data.fake_random_data', type=argparse_bool, default=False,
+                        help='Use constant fake random data.')
 
     args = parser.parse_args()
 

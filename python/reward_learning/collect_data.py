@@ -107,15 +107,16 @@ def run(args):
         os.makedirs(output_path)
     filename_template = os.path.join(output_path, file_helpers.DEFAULT_HDF5_TEMPLATE)
 
-    num_records = args.num_records
-    records_per_file = 1000
-    reset_interval = 100
-    reset_score_threshold = 0.5
-    check_written_records = False
+    records_per_file = args.records_per_file
+    num_files = args.num_files
+    num_records = num_files * records_per_file
+    reset_interval = args.reset_interval
+    reset_score_threshold = args.reset_score_threshold
+    check_written_records = True
 
     epsilon = args.epsilon
 
-    obs_levels = [int(x) for x in args.obs_levels.trim("[]").split(",")]
+    obs_levels = [int(x) for x in args.obs_levels.strip("[]").split(",")]
     obs_size = args.obs_size
     # obs_levels = [0, 1, 2, 3]
     # obs_levels = [1]
@@ -160,12 +161,15 @@ def run(args):
             time.sleep(1)
         return
 
-    current_file_num = 0
+    next_file_num = 0
     records = []
     environment.reset()
     prev_action = np.random.randint(0, environment.get_num_of_actions())
     reset_env = False
     for i in xrange(num_records):
+        if next_file_num >= num_files:
+            break
+
         print("Record #{}".format(i))
         current_pose = environment.get_pose()
 
@@ -191,12 +195,11 @@ def run(args):
         # Simulate effect of actions and compute depth maps and rewards
         prob_rewards = np.zeros((environment.get_num_of_actions(),))
         visit_counts = np.zeros((environment.get_num_of_actions(),))
+        collision_flags = np.zeros((environment.get_num_of_actions(),))
         for action in xrange(environment.get_num_of_actions()):
-            if i > 0 and environment.is_action_colliding(current_pose, action):
+            if environment.is_action_colliding(current_pose, action):
                 print("Action {} would collide".format(action))
-                prob_rewards[action] = -1
-                visit_counts[action] = 0
-                continue
+                collision_flags[action] = 1
             new_pose = environment.simulate_action_on_pose(current_pose, action)
             environment.set_pose(new_pose, wait_until_set=True)
             # point_cloud = environment._get_depth_point_cloud(new_pose)
@@ -219,16 +222,17 @@ def run(args):
         visit_counts = np.array(visit_counts, dtype=np.float32)
         visit_weights = 1. / (visit_counts + 1)
         adjusted_rewards = prob_rewards * visit_weights
+        adjusted_rewards[collision_flags > 0] = - np.finfo(np.float32).max
         print("Adjusted expected rewards:", adjusted_rewards)
 
-        if np.all(prob_rewards[action] < 0):
+        if np.all(collision_flags[action] > 0):
             reset_env = True
             continue
 
         # Perform epsilon-greedy action.
         if np.random.rand() < epsilon:
             valid_action_indices = np.arange(environment.get_num_of_actions())
-            valid_action_indices = valid_action_indices[prob_rewards >= 0]
+            valid_action_indices = valid_action_indices[collision_flags == 0]
             assert(len(valid_action_indices) > 0)
             action = np.random.choice(valid_action_indices)
         else:
@@ -244,7 +248,7 @@ def run(args):
                     action = np.random.choice(actions)
         # print("Selected action: {}".format(action))
 
-        if adjusted_rewards[action] < 0:
+        if np.all(collision_flags[action] > 0):
             reset_env = True
             continue
 
@@ -260,6 +264,9 @@ def run(args):
         # result = environment.get_mapper().perform_insert_point_cloud_rpy(
         #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
         depth_image = environment.get_engine().get_depth_image()
+        full_rgb_image = environment.get_engine().get_rgb_image(scale_factor=1)
+        full_depth_image = environment.get_engine().get_depth_image(scale_factor=1)
+        full_normal_image = environment.get_engine().get_normal_image(scale_factor=1)
 
         # Query octomap
         in_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
@@ -270,9 +277,14 @@ def run(args):
             visualization.plot_grid(in_grid_3ds[..., 4], in_grid_3ds[..., 5], title_prefix="input", show=False, fig_offset=fig)
             visualization.show(stop=True)
 
+        # sim_result = environment.get_mapper().perform_insert_depth_map_rpy(
+        #     new_pose.location(), new_pose.orientation_rpy(),
+        #     depth_image, intrinsics, downsample_to_grid=True, simulate=True)
         result = environment.get_mapper().perform_insert_depth_map_rpy(
             new_pose.location(), new_pose.orientation_rpy(),
             depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+        # print("result diff:", sim_result.probabilistic_reward - result.probabilistic_reward)
+        # assert(sim_result.probabilistic_reward - result.probabilistic_reward == 0)
 
         # Query octomap
         out_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
@@ -286,8 +298,10 @@ def run(args):
                             result.probabilistic_reward, result.normalized_probabilistic_reward])
         # scores = np.array([result.score, result.normalized_score,
         #                    result.probabilistic_score, result.normalized_probabilistic_score])
-        record = data_record.RecordV3(obs_levels, in_grid_3ds, out_grid_3ds,
-                                      rewards, scores)
+        record = data_record.RecordV4(intrinsics, map_resolution, axis_mode, forward_factor,
+                                      obs_levels, in_grid_3ds, out_grid_3ds,
+                                      rewards, scores,
+                                      full_rgb_image, full_depth_image, full_normal_image)
 
         prev_action = action
 
@@ -295,16 +309,20 @@ def run(args):
             records.append(record)
 
         if not args.dry_run and len(records) % records_per_file == 0:
-            # filename, current_file_num = get_next_output_tf_filename(current_file_num)
-            filename, current_file_num = file_helpers.get_next_output_hdf5_filename(
-                current_file_num, template=filename_template)
+            # filename, next_file_num = get_next_output_tf_filename(next_file_num)
+            filename, next_file_num = file_helpers.get_next_output_hdf5_filename(
+                next_file_num, template=filename_template)
             print("Writing records to file {}".format(filename))
             # write_tf_records(filename, records)
-            data_record.write_hdf5_records_v3(filename, records)
+            data_record.write_hdf5_records_v4(filename, records)
             if check_written_records:
                 print("Reading records from file {}".format(filename))
-                records_read = data_record.read_hdf5_records_v3_as_list(filename)
+                records_read = data_record.read_hdf5_records_v4_as_list(filename)
                 for record, record_read in zip(records, records_read):
+                    assert(np.all(record.intrinsics == record_read.intrinsics))
+                    assert(record.map_resolution == record_read.map_resolution)
+                    assert(record.axis_mode == record_read.axis_mode)
+                    assert(record.forward_factor == record_read.forward_factor)
                     assert(np.all(record.obs_levels == record_read.obs_levels))
                     for in_grid_3d, in_grid_3d_read in zip(record.in_grid_3d, record_read.in_grid_3d):
                         assert(np.all(in_grid_3d == in_grid_3d_read))
@@ -312,6 +330,9 @@ def run(args):
                         assert(np.all(out_grid_3d == out_grid_3d_read))
                     assert(np.all(record.rewards == record_read.rewards))
                     assert(np.all(record.scores == record_read.scores))
+                    assert(np.all(record.rgb_image == record_read.rgb_image))
+                    assert(np.all(record.depth_image == record_read.depth_image))
+                    assert(np.all(record.normal_image == record_read.normal_image))
             records = []
 
 
@@ -321,10 +342,13 @@ if __name__ == '__main__':
     parser.add_argument('--manual', action='store_true')
     parser.add_argument('--dry-run', action='store_true', help="Do not save anything")
     parser.add_argument('--output-path', type=str, help="Output path")
-    parser.add_argument('--environment', type=str, required=True, help="Environment name")
     parser.add_argument('--obs-levels', default="0,1,2,3,4", type=str)
     parser.add_argument('--obs-size', default=16, type=int)
-    parser.add_argument('--num-records', default=10000, type=int, help="Total records to collect")
+    parser.add_argument('--records-per-file', default=1000, type=int, help="Samples per file")
+    parser.add_argument('--num-files', default=100, type=int, help="Number of files")
+    parser.add_argument('--environment', type=str, required=True, help="Environment name")
+    parser.add_argument('--reset-interval', default=100, type=int)
+    parser.add_argument('--reset-score-threshold', default=0.3, type=float)
     parser.add_argument('--epsilon', default=0.2, type=float)
     parser.add_argument('--axis-mode', default=0, type=int)
     parser.add_argument('--forward-factor', default=3 / 8., type=float)

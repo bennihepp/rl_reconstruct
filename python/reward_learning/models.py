@@ -9,6 +9,7 @@ import tf_utils
 
 def get_default_model_config():
     config = {}
+    config["loss_mode"] = "mean"
     config["modules"] = ["conv3d", "regression"]
     config["conv3d"] = {}
     config["conv3d"]["num_convs_per_block"] = 8
@@ -41,7 +42,9 @@ class ModelModule(object):
     def __init__(self, config, input_tensor):
         self._config = config
         self._input = input_tensor
-        self._variables = []
+        self._trainable_variables = []
+        self._local_variables = []
+        self._global_variables = []
         self._summaries = {}
         self._scope = tf.get_variable_scope()
         self._output = None
@@ -71,11 +74,38 @@ class ModelModule(object):
         else:
             return tf_utils.get_activation_function_by_name(fn, default)
 
-    def _add_variable(self, var):
-        self._variables.append(var)
+    def _add_variables(self, scope=None):
+        if scope is None:
+            scope_name = self._scope.name
+        elif type(scope) == str:
+            scope_name = scope
+        else:
+            scope_name = scope.name
+        self._add_trainable_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope_name))
+        self._add_global_variables(tf.get_collection(tf.GraphKeys.GLOBAL_VARIABLES, scope_name))
+        self._add_local_variables(tf.get_collection(tf.GraphKeys.LOCAL_VARIABLES, scope_name))
 
-    def _add_variables(self, vars):
-        self._variables.extend(vars)
+    def _add_variables_from_sub_scope(self, sub_scope_name):
+        with tf.variable_scope(sub_scope_name) as scope:
+            self._add_variables(scope)
+
+    def _add_trainable_variable(self, var):
+        self._trainable_variables.append(var)
+
+    def _add_trainable_variables(self, vars):
+        self._trainable_variables.extend(vars)
+
+    def _add_global_variable(self, var):
+        self._global_variables.append(var)
+
+    def _add_global_variables(self, vars):
+        self._global_variables.extend(vars)
+
+    def _add_local_variable(self, var):
+        self._local_variables.append(var)
+
+    def _add_local_variables(self, vars):
+        self._local_variables.extend(vars)
 
     def _add_summary(self, name, tensor):
         assert(name not in self._summaries)
@@ -99,7 +129,19 @@ class ModelModule(object):
 
     @property
     def variables(self):
-        return self._variables
+        return self._trainable_variables
+
+    @property
+    def trainable_variables(self):
+        return self._trainable_variables
+
+    @property
+    def global_variables(self):
+        return self._global_variables
+
+    @property
+    def local_variables(self):
+        return self._local_variables
 
     @property
     def summaries(self):
@@ -169,9 +211,10 @@ class Conv3DModule(ModelModule):
                     name="conv3d_{}_{}".format(i, j),
                     variables_on_cpu=variables_on_cpu,
                     collections=variables_collections)
-                self._add_summary("conv3d_{}_{}/activations".format(i, j), x)
                 if (j + 1) < num_convs_per_block:
                     num_filters += filter_increase_within_block
+                self._add_summary("conv3d_{}_{}/activations".format(i, j), x)
+                self._add_variables_from_sub_scope("conv3d_{}_{}".format(i, j))
             do_maxpool = maxpool_after_each_block or (max_num_blocks > 0 and (i + 1) >= max_num_blocks)
             if do_maxpool:
                 x_grid_size = int(x.shape[-2])
@@ -195,8 +238,6 @@ class Conv3DModule(ModelModule):
                     # Add summaries for layer
                     self._add_summary("conv3d_{}_{}/weights".format(i, j), weights)
                     self._add_summary("conv3d_{}_{}/biases".format(i, j), biases)
-
-                self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
 
             num_filters += filter_increase_per_block
 
@@ -281,7 +322,7 @@ class RegressionModule(ModelModule):
                 # Add summaries for layer
                 self._add_summary("fc_{}/weights".format(i), weights)
                 self._add_summary("fc_{}/biases".format(i), biases)
-            self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
+            self._add_variables(scope)
 
         with tf.variable_scope('output') as scope:
             if fully_convolutional:
@@ -320,7 +361,7 @@ class RegressionModule(ModelModule):
             # Add summaries for layer
             self._add_summary("output/weights", weights)
             self._add_summary("output/biases", biases)
-        self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
+            self._add_variables(scope)
 
         self._set_output(x)
 
@@ -396,6 +437,7 @@ class UpsamplingModule(ModelModule):
                     self._add_summary("output_all", x)
                 else:
                     self._add_summary("conv3d_trans_{}_{}/activations".format(i, j), x)
+                self._add_variables_from_sub_scope("conv3d_trans_{}_{}".format(i, j))
                 if verbose:
                     print("  x.shape, {} {}: {}".format(i, j, x.shape))
             # Make layer accessible from outside
@@ -409,8 +451,6 @@ class UpsamplingModule(ModelModule):
                     # Add summaries for layer
                     self._add_summary("conv3d_trans_{}_{}/weights".format(i, j), weights)
                     self._add_summary("conv3d_trans_{}_{}/biases".format(i, j), biases)
-
-                self._add_variables(tf.get_collection(tf.GraphKeys.TRAINABLE_VARIABLES, scope.name))
 
             num_filters -= filter_decrease_per_block
             i += 1
@@ -440,6 +480,14 @@ class Model(ModelModule):
 
         assert(("regression" in self._config) ^ ("upsampling" in self._config))
 
+        loss_mode = self._get_config("loss_mode", "mean")
+        if loss_mode == "mean":
+            reduce_loss_fn = tf.reduce_mean
+        elif loss_mode == "sum":
+            reduce_loss_fn = tf.reduce_sum
+        else:
+            raise NotImplementedError("Unknown loss mode: {}".format(loss_mode))
+
         if "regression" in self._config:
             self._regression_module = RegressionModule(
                 self._config["regression"],
@@ -451,7 +499,7 @@ class Model(ModelModule):
                 verbose=verbose)
             self._modules["regression"] = self._regression_module
             self._set_output(self._regression_module.output)
-            self._loss_batch = tf.reduce_mean(
+            self._loss_batch = reduce_loss_fn(
                 tf.square(self.output - target_batch),
                 axis=-1, name="loss_batch")
         else:
@@ -469,34 +517,42 @@ class Model(ModelModule):
             if verbose:
                 print("Shape of output: {}".format(self.output.shape))
                 print("Shape of target_batch: {}".format(target_batch.shape))
-            output = tf.reshape(self.output, [int(self.output.shape[0]), -1])
+            reshaped_output = tf.reshape(self.output, [int(self.output.shape[0]), -1])
             reshaped_target_batch = tf.reshape(target_batch, [int(self.output.shape[0]), -1])
             if verbose:
-                print("Reshaped output: {}".format(output.shape))
+                print("Reshaped output: {}".format(reshaped_output.shape))
                 print("Reshaped target_batch: {}".format(reshaped_target_batch.shape))
-            self._loss_batch = tf.reduce_mean(
-                tf.square(output - reshaped_target_batch),
+            self._loss_batch = reduce_loss_fn(
+                tf.square(reshaped_output - reshaped_target_batch),
                 axis=-1, name="loss_batch")
             if verbose:
                 print("Shape of batch loss: {}".format(self._loss_batch.shape))
 
-        for module_name, module in self._modules.iteritems():
-            self._add_variables(module.variables)
+        for module_name in sorted(self._modules.keys()):
+            module = self._modules[module_name]
+            self._add_trainable_variables(module.trainable_variables)
+            self._add_global_variables(module.global_variables)
+            self._add_local_variables(module.local_variables)
             for tensor_name, tensor in module.summaries.iteritems():
                 self._add_summary(module_name + "/" + tensor_name, tensor)
 
         self._loss = tf.reduce_mean(self._loss_batch, name="loss")
-        self._loss = tf.reduce_mean(tf.square(self.output - target_batch), name="loss")
+        # self._loss = tf.reduce_mean(tf.square(self.output - target_batch), name="loss")
         if verbose:
             print("Shape of loss: {}".format(self._loss.shape))
         self._loss_min = tf.reduce_min(self._loss_batch, name="loss_min")
         self._loss_max = tf.reduce_max(self._loss_batch, name="loss_max")
 
-        self._gradients = tf.gradients(self._loss, self.variables)
+        self._gradients = tf.gradients(self._loss, self.trainable_variables)
+        self._gradients_and_variables = list(zip(self.gradients, self.trainable_variables))
 
     @property
     def gradients(self):
         return self._gradients
+
+    @property
+    def gradients_and_variables(self):
+        return self._gradients_and_variables
 
     @property
     def modules(self):
@@ -526,7 +582,9 @@ class MultiGpuModelWrapper(ModelModule):
         super(MultiGpuModelWrapper, self).__init__(models[0].config, models[0].input)
 
         self._models = models
-        self._add_variables(models[0].variables)
+        self._add_trainable_variables(models[0].trainable_variables)
+        self._add_global_variables(models[0].global_variables)
+        self._add_local_variables(models[0].local_variables)
         for name in models[0].summaries.keys():
             concat_tensors = tf.concat([model.summaries[name] for model in models], axis=0)
             self._add_summary(name, concat_tensors)
@@ -545,6 +603,7 @@ class MultiGpuModelWrapper(ModelModule):
         self._loss_max = tf.reduce_max(loss_max_concat, axis=0)
 
         self._gradients = self._mean_gradients([model.gradients for model in models], verbose)
+        self._gradients_and_variables = list(zip(self.gradients, self.trainable_variables))
 
     def _mean_gradients(self, gradients_list, verbose=False):
         mean_grads = []
@@ -569,6 +628,10 @@ class MultiGpuModelWrapper(ModelModule):
     @property
     def gradients(self):
         return self._gradients
+
+    @property
+    def gradients_and_variables(self):
+        return self._gradients_and_variables
 
     @property
     def modules(self):

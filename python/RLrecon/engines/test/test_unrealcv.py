@@ -1,7 +1,7 @@
 import pytest
 import numpy as np
 import cv2
-from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
 
 
 @pytest.fixture(scope="module")

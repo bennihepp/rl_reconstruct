@@ -1,19 +1,18 @@
 import gym
-from gym import error, spaces, utils
-from gym.utils import seeding
 import numpy as np
 import rospy
 from RLrecon import math_utils
-from RLrecon.environment import SimpleV2Environment
-from RLrecon.engine.dummy_engine import DummyEngine
-from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.dummy_engine import DummyEngine
+from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.environments.environment import SimpleV3Environment
+from gym import spaces
 
 
-class RLreconSimpleV2Env(gym.Env):
+class RLreconSimpleV3Env(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self):
-        super(RLreconSimpleV2Env, self).__init__()
+        super(RLreconSimpleV3Env, self).__init__()
         rospy.init_node('gym_RLrecon_simple_node', anonymous=False)
         world_bounding_box = math_utils.BoundingBox(
             [-25, -25,   0],
@@ -24,7 +23,7 @@ class RLreconSimpleV2Env(gym.Env):
             [+10, +10, +10]
         )
         engine = DummyEngine()
-        self._environment = SimpleV2Environment(
+        self._environment = SimpleV3Environment(
             world_bounding_box, engine=engine, random_reset=True,
             clear_size=6.0, filter_depth_map=False,
             score_bounding_box=score_bounding_box)

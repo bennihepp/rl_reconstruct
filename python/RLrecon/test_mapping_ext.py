@@ -4,13 +4,13 @@ import numpy as np
 import cv2
 import rospy
 import tf
-from tf import transformations
 import tf_conversions
 from geometry_msgs.msg import Transform
 from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
 from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
-from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.contrib import transformations
+from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
 
 
 """Returns point cloud in camera frame. Assuming x-axis points forward, y-axis left and z-axis up."""
@@ -187,7 +187,7 @@ def run(engine, point_cloud_topic, location_origin):
 
 if __name__ == '__main__':
     engine = UnrealCVWrapper(image_scale_factor=1.0)
-    point_cloud_topic = 'insert_point_cloud'
+    point_cloud_topic = '/octomap_server_ext/insert_point_cloud'
     location_origin = np.array([0, 0, 0])
     rospy.init_node('test_mapping', anonymous=False)
     run(engine, point_cloud_topic, location_origin)

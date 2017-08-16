@@ -7,6 +7,7 @@ import Queue
 import numpy as np
 import h5py
 import tensorflow as tf
+from RLrecon import math_utils
 
 
 Record = namedtuple("Record", ["obs_levels", "grid_3d", "rewards", "prob_rewards", "scores"])
@@ -19,6 +20,13 @@ RecordV2Batch = namedtuple("RecordV2Batch", ["obs_levels", "grid_3ds", "rewards"
 
 RecordV3 = namedtuple("RecordV3", ["obs_levels", "in_grid_3d", "out_grid_3d", "rewards", "scores"])
 RecordV3Batch = namedtuple("RecordV3Batch", ["obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores"])
+
+RecordV4 = namedtuple("RecordV3", ["intrinsics", "map_resolution", "axis_mode", "forward_factor",
+                                   "obs_levels", "in_grid_3d", "out_grid_3d", "rewards", "scores",
+                                   "rgb_image", "depth_image", "normal_image"])
+RecordV4Batch = namedtuple("RecordV3Batch", ["intrinsics", "map_resolution", "axis_mode", "forward_factor"
+                                             "obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores",
+                                             "rgb_images", "depth_images", "normal_images"])
 
 
 def write_hdf5_file(filename, numpy_dict):
@@ -141,6 +149,49 @@ def write_hdf5_records_v3(filename, records):
     f.close()
 
 
+def write_hdf5_records_v4(filename, records):
+    f = h5py.File(filename, "w")
+    rec0 = records[0]
+    assert(rec0.in_grid_3d.shape[-1] == 2 * len(rec0.obs_levels))
+    assert(np.all(rec0.in_grid_3d.shape == rec0.out_grid_3d.shape))
+    rewards_shape = (len(records),) + rec0.rewards.shape
+    rewards_dset = f.create_dataset("rewards", rewards_shape, dtype=np.float32)
+    scores_shape = (len(records),) + rec0.scores.shape
+    scores_dset = f.create_dataset("scores", scores_shape, dtype=np.float32)
+    in_grid_3ds_shape = (len(records),) + rec0.in_grid_3d.shape
+    in_grid_3ds_dset = f.create_dataset("in_grid_3ds", in_grid_3ds_shape, dtype=np.float32)
+    out_grid_3ds_shape = (len(records),) + rec0.out_grid_3d.shape
+    out_grid_3ds_dset = f.create_dataset("out_grid_3ds", out_grid_3ds_shape, dtype=np.float32)
+    rgb_image_shape = (len(records),) + rec0.rgb_image.shape
+    rgb_image_dset = f.create_dataset("rgb_images", rgb_image_shape, dtype=np.uint8)
+    depth_image_shape = (len(records),) + rec0.depth_image.shape
+    depth_image_dset = f.create_dataset("depth_images", depth_image_shape, dtype=np.float32)
+    normal_image_shape = (len(records),) + rec0.normal_image.shape
+    normal_image_dset = f.create_dataset("normal_images", normal_image_shape, dtype=np.float32)
+    f.attrs["obs_levels"] = rec0.obs_levels
+    f.attrs["obs_channels"] = out_grid_3ds_shape[-1] / len(rec0.obs_levels)
+    f.attrs["map_resolution"] = rec0.map_resolution
+    f.attrs["axis_mode"] = rec0.axis_mode
+    f.attrs["forward_factor"] = rec0.forward_factor
+    f.attrs["intrinsics"] = rec0.intrinsics
+    for i, record in enumerate(records):
+        assert(np.all(record.intrinsics == rec0.intrinsics))
+        assert(record.map_resolution == rec0.map_resolution)
+        assert(record.axis_mode == rec0.axis_mode)
+        assert(record.forward_factor == rec0.forward_factor)
+        assert(np.all(record.obs_levels == rec0.obs_levels))
+        assert(np.all(record.in_grid_3d.shape == rec0.in_grid_3d.shape))
+        assert(np.all(record.out_grid_3d.shape == rec0.out_grid_3d.shape))
+        in_grid_3ds_dset[i, ...] = record.in_grid_3d
+        out_grid_3ds_dset[i, ...] = record.out_grid_3d
+        rewards_dset[i, ...] = record.rewards
+        scores_dset[i, ...] = record.scores
+        rgb_image_dset[i, ...] = record.rgb_image
+        depth_image_dset[i, ...] = record.depth_image
+        normal_image_dset[i, ...] = record.normal_image
+    f.close()
+
+
 def read_hdf5_records_v2(filename):
     try:
         f = h5py.File(filename, "r")
@@ -181,6 +232,27 @@ def read_hdf5_records_v3(filename):
         return RecordV3Batch(obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores)
     except Exception, err:
         print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
+        raise
+
+
+def read_hdf5_records_v4(filename):
+    try:
+        f = h5py.File(filename, "r")
+        obs_levels = np.array(f.attrs["obs_levels"])
+        obs_channels = np.array(f.attrs["obs_channels"])
+        in_grid_3ds = np.array(f["in_grid_3ds"])
+        out_grid_3ds = np.array(f["out_grid_3ds"])
+        rewards = np.array(f["rewards"])
+        scores = np.array(f["scores"])
+        f.close()
+        assert(in_grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
+        assert(np.all(out_grid_3ds.shape == in_grid_3ds.shape))
+        assert(rewards.shape[0] == in_grid_3ds.shape[0])
+        assert(scores.shape[0] == in_grid_3ds.shape[0])
+        return RecordV3Batch(obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores)
+    except Exception, err:
+        print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
+        raise
 
 
 def generate_single_records_from_batch_v2(record_batch):
@@ -220,6 +292,33 @@ def generate_single_records_from_hdf5_file_v3(filename):
     return generate_single_records_from_batch_v3(record_batch)
 
 
+def generate_single_records_from_batch_v4(record_batch):
+    for i in xrange(record_batch.rewards.shape[0]):
+        intrinsics = np.array(record_batch.intrinsics)
+        map_resolution = np.array(record_batch.map_resolution)
+        axis_mode = np.array(record_batch.axis_mode)
+        forward_factor = np.array(record_batch.forward_factor)
+        obs_levels = np.array(record_batch.obs_levels)
+        in_grid_3d = record_batch.in_grid_3ds[i, ...]
+        out_grid_3d = record_batch.out_grid_3ds[i, ...]
+        single_rewards = record_batch.rewards[i, ...]
+        single_scores = record_batch.scores[i, ...]
+        rgb_image = record_batch.rgb_images[i, ...]
+        depth_image = record_batch.depth_images[i, ...]
+        normal_image = record_batch.normal_images[i, ...]
+
+        record = RecordV4(intrinsics, map_resolution, axis_mode, forward_factor,
+                          obs_levels, in_grid_3d, out_grid_3d,
+                          single_rewards, single_scores,
+                          rgb_image, depth_image, normal_image)
+        yield record
+
+
+def generate_single_records_from_hdf5_file_v4(filename):
+    record_batch = read_hdf5_records_v4(filename)
+    return generate_single_records_from_batch_v4(record_batch)
+
+
 def read_hdf5_records_as_list(filename):
     obs_levels, grid_3ds, rewards, prob_rewards, scores = read_hdf5_records(filename)
     records = []
@@ -246,6 +345,12 @@ def read_hdf5_records_v3_as_list(filename):
     return records
 
 
+def read_hdf5_records_v4_as_list(filename):
+    record_batch = read_hdf5_records_v4(filename)
+    records = [record for record in generate_single_records_from_batch_v4(record_batch)]
+    return records
+
+
 def count_records_in_hdf5_file_v2(filename):
     record_batch = read_hdf5_records_v2(filename)
     return record_batch.grid_3ds.shape[0]
@@ -253,6 +358,11 @@ def count_records_in_hdf5_file_v2(filename):
 
 def count_records_in_hdf5_file_v3(filename):
     record_batch = read_hdf5_records_v3(filename)
+    return record_batch.in_grid_3ds.shape[0]
+
+
+def count_records_in_hdf5_file_v4(filename):
+    record_batch = read_hdf5_records_v4(filename)
     return record_batch.in_grid_3ds.shape[0]
 
 
@@ -298,6 +408,7 @@ class HDF5QueueReader(object):
 
 HDF5_RECORD_VERSION_2 = 2
 HDF5_RECORD_VERSION_3 = 3
+HDF5_RECORD_VERSION_4 = 4
 HDF5_RECORD_VERSION_LATEST = HDF5_RECORD_VERSION_3
 
 
@@ -310,6 +421,8 @@ class HDF5ReaderProcess(object):
             self._record_generator_factory = generate_single_records_from_hdf5_file_v2
         elif hdf5_record_version == HDF5_RECORD_VERSION_3:
             self._record_generator_factory = generate_single_records_from_hdf5_file_v3
+        elif hdf5_record_version == HDF5_RECORD_VERSION_4:
+            self._record_generator_factory = generate_single_records_from_hdf5_file_v4
         else:
             raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
         self._process = None
@@ -439,6 +552,8 @@ class HDF5ReaderProcessCoordinator(object):
                 count_record_fn = count_records_in_hdf5_file_v2
             elif self._hdf5_record_version == HDF5_RECORD_VERSION_3:
                 count_record_fn = count_records_in_hdf5_file_v3
+            elif self._hdf5_record_version == HDF5_RECORD_VERSION_4:
+                count_record_fn = count_records_in_hdf5_file_v4
             else:
                 raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
             record_counts_async = p.map_async(count_record_fn, self._filenames, chunksize=1)
@@ -460,29 +575,25 @@ class HDF5ReaderProcessCoordinator(object):
 
 
 def compute_dataset_stats(batches_generator):
-    data_size = 0
-    sums = None
-    sq_sums = None
+    mean_and_vars = None
     for batches in batches_generator:
-        if sums is None:
-            sums = [np.zeros(batch.shape[1:]) for batch in batches]
-            sq_sums = [np.zeros(batch.shape[1:]) for batch in batches]
+        if mean_and_vars is None:
+            mean_and_vars = [math_utils.SinglePassMeanAndVariance(batch.shape[1:]) for batch in batches]
         for i, batch in enumerate(batches):
-            sums[i] += np.sum(batch, axis=0)
-            sq_sums[i] += np.sum(np.square(batch), axis=0)
+            for j in xrange(batch.shape[0]):
+                mean_and_vars[i].add_value(batch[j, ...])
             assert(batch.shape[0] == batches[0].shape[0])
-        data_size += batches[0].shape[0]
     means = []
     stddevs = []
-    for i in xrange(len(sums)):
-        mean = sums[i] / data_size
-        stddev = (sq_sums[i] - np.square(sums[i]) / data_size) / (data_size - 1)
-        stddev[np.abs(stddev) < 1e-5] = 1
-        stddev = np.sqrt(stddev)
+    for i in xrange(len(mean_and_vars)):
+        mean = mean_and_vars[i].mean
+        stddev = mean_and_vars[i].stddev
+        stddev[np.abs(stddev) < 1e-4] = 1
         assert(np.all(np.isfinite(mean)))
         assert(np.all(np.isfinite(stddev)))
         means.append(mean)
         stddevs.append(stddev)
+    data_size = mean_and_vars[0].num_samples
     return data_size, zip(means, stddevs)
 
 
@@ -498,6 +609,7 @@ def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_s
                 batches.append(batch)
             yield batches
     data_size, stats = compute_dataset_stats(batches_generator(filenames, field_names))
+
     if compute_z_scores:
 
         def z_score_batches_generator(filenames, field_names):
@@ -518,6 +630,10 @@ def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_s
             all_stats.append(z_score_stats[i])
         stats = all_stats
     return data_size, stats
+
+
+def compute_dataset_stats_from_hdf5_files_v4(filenames, field_names, compute_z_scores=True):
+    return compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_scores)
 
 
 def _int64_feature(value):

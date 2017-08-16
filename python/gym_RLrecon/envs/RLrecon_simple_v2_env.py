@@ -1,30 +1,29 @@
 import gym
-from gym import error, spaces, utils
-from gym.utils import seeding
 import numpy as np
 import rospy
 from RLrecon import math_utils
-from RLrecon.environment import SimpleV1Environment
-from RLrecon.engine.dummy_engine import DummyEngine
-from RLrecon.engine.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.dummy_engine import DummyEngine
+from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.environments.environment import SimpleV2Environment
+from gym import spaces
 
 
-class RLreconSimpleV1Env(gym.Env):
+class RLreconSimpleV2Env(gym.Env):
     metadata = {'render.modes': ['human']}
 
     def __init__(self):
-        super(RLreconSimpleV1Env, self).__init__()
+        super(RLreconSimpleV2Env, self).__init__()
         rospy.init_node('gym_RLrecon_simple_node', anonymous=False)
         world_bounding_box = math_utils.BoundingBox(
             [-20, -20,   0],
             [+20, +20, +20],
         )
         score_bounding_box = math_utils.BoundingBox(
-            [-10, -10, -10],
-            [+10, +10, +10]
+            [-3, -3, -0.5],
+            [+3, +3, +5]
         )
         engine = DummyEngine()
-        self._environment = SimpleV1Environment(
+        self._environment = SimpleV2Environment(
             world_bounding_box, engine=engine, random_reset=True,
             clear_size=6.0, filter_depth_map=False,
             score_bounding_box=score_bounding_box)
@@ -42,6 +41,11 @@ class RLreconSimpleV1Env(gym.Env):
             0.0,
             1.0,
             shape=(self._obs_size_x, self._obs_size_y, self._obs_size_z, 1)
+        )
+        self.observation_space = spaces.Box(
+            -1000,
+            +1000,
+            shape=(14,)
         )
 
     def _configure(self, client_id, remotes):
@@ -71,7 +75,12 @@ class RLreconSimpleV1Env(gym.Env):
         location = self._environment.get_location()
         # orientation_rpy = self._environment.get_orientation_rpy()
         orientation_quat = self._environment.get_orientation_quat()
-        return [location, orientation_quat, occupancies_3d]
+        # return [location, orientation_quat, occupancies_3d]
+        # return [location, orientation_quat, grid_3d]
+        previous_state_orientation_quat = math_utils.convert_rpy_to_quat(self._previous_state.orientation_rpy())
+        orientation_quat *= np.sign(orientation_quat[3])
+        previous_state_orientation_quat *= np.sign(previous_state_orientation_quat[3])
+        return [location, orientation_quat, self._previous_state.location(), previous_state_orientation_quat]
 
     def _step(self, action):
         self._previous_state = self._current_state

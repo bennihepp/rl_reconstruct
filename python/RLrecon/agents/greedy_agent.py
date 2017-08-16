@@ -77,15 +77,15 @@ class GreedyAgent(BaseAgent):
         pc_xyz = ros_utils.structured_to_3d_array(pc)
         return pc_xyz
 
-    def _perform_raycast(self, state, max_range):
+    def _perform_raycast(self, pose, max_range):
         width = self._environment._engine.get_width()
         height = self._environment._engine.get_height()
         focal_length = self._environment._engine.get_focal_length()
         ignore_unknown_voxels = self._ignore_unknown_voxels
         timer = utils.Timer()
         rr = self._environment._mapper.perform_raycast_camera_rpy(
-            state.location(),
-            state.orientation_rpy(),
+            pose.location(),
+            pose.orientation_rpy(),
             width, height, focal_length,
             ignore_unknown_voxels,
             max_range
@@ -93,11 +93,11 @@ class GreedyAgent(BaseAgent):
         print("Raycast took {} seconds".format(timer.elapsed_seconds()))
         return rr
 
-    def _get_tentative_reward(self, state, action_index):
-        if self._environment.is_action_allowed(state, action_index):
-            tentative_state = self._environment.simulate_action(state, action_index)
+    def _get_tentative_reward(self, pose, action_index):
+        if self._environment.is_action_allowed_on_pose(pose, action_index):
+            tentative_pose = self._environment.simulate_action_on_pose(pose, action_index)
             max_range = 14.0
-            rr = self._perform_raycast(tentative_state, max_range)
+            rr = self._perform_raycast(tentative_pose, max_range)
             # Publish point cloud with uncertain voxels
             timer = utils.Timer()
             if self._use_surface_only:
@@ -115,13 +115,14 @@ class GreedyAgent(BaseAgent):
             reward = self._environment.get_action_not_allowed_reward()
         return reward
 
-    def next_action(self, state):
+    def next_action(self):
         rewards = np.empty((self._environment.num_actions(),))
+        pose = self._environment.get_pose()
         for action_index in xrange(self._environment.num_actions()):
             print("Testing action {} [{}]".format(
                 action_index,
                 self._environment.get_action_name(action_index)))
-            reward = self._get_tentative_reward(state, action_index)
+            reward = self._get_tentative_reward(pose, action_index)
             rewards[action_index] = reward
         # Choose a best action
         max_reward = np.max(rewards)
