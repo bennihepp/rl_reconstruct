@@ -76,7 +76,7 @@ class UnrealCVWrapper(BaseEngine):
         self._request_trials = 0
         return result
 
-    def _scale_image(self, image, scale_factor=None, interpolation_mode=cv2.INTER_CUBIC):
+    def scale_image(self, image, scale_factor=None, interpolation_mode=cv2.INTER_CUBIC):
         """Scale an image to the desired size"""
         if scale_factor is None:
             scale_factor = self._image_scale_factor
@@ -86,9 +86,9 @@ class UnrealCVWrapper(BaseEngine):
         scaled_image = cv2.resize(image, dsize=dsize, interpolation=interpolation_mode)
         return scaled_image
 
-    def _scale_image_with_nearest_interpolation(self, image, scale_factor=None):
+    def scale_image_with_nearest_interpolation(self, image, scale_factor=None):
         """Scale an image to the desired size using 'nearest' interpolation"""
-        return self._scale_image(image, scale_factor=scale_factor, interpolation_mode=cv2.INTER_NEAREST)
+        return self.scale_image(image, scale_factor=scale_factor, interpolation_mode=cv2.INTER_NEAREST)
 
     def _ray_distance_to_depth_image(self, ray_distance_image, focal_length):
         """Convert a ray-distance image to a plane depth image"""
@@ -130,6 +130,10 @@ class UnrealCVWrapper(BaseEngine):
         if response != "ok":
             raise self.Exception("UnrealCV request failed: {}".format(response))
 
+    def get_image_scale_factor(self):
+        """Return scale factor for image retrieval"""
+        return self._image_scale_factor
+
     def get_focal_length(self):
         """Return focal length of camera"""
         # # TODO: Focal length (and also projection matrix) should come from UnrealCV
@@ -158,14 +162,14 @@ class UnrealCVWrapper(BaseEngine):
         img_str = self._unrealcv_request('vget /camera/0/lit png')
         img = np.fromstring(img_str, np.uint8)
         rgb_image = cv2.imdecode(img, cv2.IMREAD_COLOR)
-        rgb_image = self._scale_image(rgb_image, scale_factor)
+        rgb_image = self.scale_image(rgb_image, scale_factor)
         return rgb_image
 
     def get_rgb_image_by_file(self, scale_factor=None):
         """Return the current RGB image (transport via filesystem)"""
         filename = self._unrealcv_request('vget /camera/0/lit lit.png')
         rgb_image = cv2.imread(filename)
-        rgb_image = self._scale_image(rgb_image, scale_factor)
+        rgb_image = self.scale_image(rgb_image, scale_factor)
         os.remove(filename)
         return rgb_image
 
@@ -174,7 +178,7 @@ class UnrealCVWrapper(BaseEngine):
         img_str = self._unrealcv_request('vget /camera/0/normal png')
         img = np.fromstring(img_str, np.uint8)
         normal_image = cv2.imdecode(img, cv2.IMREAD_COLOR)
-        normal_image = self._scale_image_with_nearest_interpolation(normal_image, scale_factor)
+        normal_image = self.scale_image_with_nearest_interpolation(normal_image, scale_factor)
         return normal_image
 
     def get_normal_rgb_image_by_file(self, scale_factor=None):
@@ -183,7 +187,7 @@ class UnrealCVWrapper(BaseEngine):
         """
         filename = self._unrealcv_request('vget /camera/0/normal normal.png')
         normal_image = cv2.imread(filename)
-        normal_image = self._scale_image_with_nearest_interpolation(normal_image, scale_factor)
+        normal_image = self.scale_image_with_nearest_interpolation(normal_image, scale_factor)
         os.remove(filename)
         return normal_image
 
@@ -213,14 +217,14 @@ class UnrealCVWrapper(BaseEngine):
         img_str = self._unrealcv_request('vget /camera/0/depth npy')
         img_str_io = StringIO(img_str)
         ray_distance_image = np.load(img_str_io)
-        ray_distance_image = self._scale_image_with_nearest_interpolation(ray_distance_image, scale_factor)
+        ray_distance_image = self.scale_image_with_nearest_interpolation(ray_distance_image, scale_factor)
         return ray_distance_image
 
     def get_ray_distance_image_by_file(self, scale_factor=None):
         """Return the current ray-distance image (transport via filesystem)"""
         filename = self._unrealcv_request('vget /camera/0/depth depth.exr')
         ray_distance_image = cv2.imread(filename, cv2.IMREAD_ANYDEPTH)
-        ray_distance_image = self._scale_image_with_nearest_interpolation(ray_distance_image, scale_factor)
+        ray_distance_image = self.scale_image_with_nearest_interpolation(ray_distance_image, scale_factor)
         os.remove(filename)
         return ray_distance_image
 

@@ -11,6 +11,7 @@ import file_helpers
 from utils import argparse_bool
 from policy_helpers import VisitedPoses
 from RLrecon import math_utils
+from RLrecon.utils import Timer
 
 
 def plot_grid(occupancies_3d, observation_certainties_3d):
@@ -102,6 +103,9 @@ def query_octomap(environment, pose, obs_levels, obs_sizes, map_resolution, axis
 
 
 def run(args):
+    timer = Timer()
+    measure_timing = False
+
     output_path = args.output_path
     if not os.path.isdir(output_path):
         os.makedirs(output_path)
@@ -112,7 +116,7 @@ def run(args):
     num_records = num_files * records_per_file
     reset_interval = args.reset_interval
     reset_score_threshold = args.reset_score_threshold
-    check_written_records = True
+    check_written_records = False
 
     epsilon = args.epsilon
 
@@ -200,15 +204,23 @@ def run(args):
             if environment.is_action_colliding(current_pose, action):
                 print("Action {} would collide".format(action))
                 collision_flags[action] = 1
+            if measure_timing:
+                print("  simulate collision check took {} s".format(timer.restart()))
             new_pose = environment.simulate_action_on_pose(current_pose, action)
             environment.set_pose(new_pose, wait_until_set=True)
+            if measure_timing:
+                print("  simulate set_pose took {} s".format(timer.restart()))
             # point_cloud = environment._get_depth_point_cloud(new_pose)
             # result = environment.get_mapper().perform_insert_point_cloud_rpy(
             #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
             depth_image = environment.get_engine().get_depth_image()
+            if measure_timing:
+                print("  simulate depth map retrieval took {} s".format(timer.restart()))
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 new_pose.location(), new_pose.orientation_rpy(),
                 depth_image, intrinsics, downsample_to_grid=True, simulate=True)
+            if measure_timing:
+                print("  simulate insert depth map took {} s".format(timer.restart()))
             prob_reward = result.probabilistic_reward
 
             prob_rewards[action] = prob_reward
@@ -216,6 +228,9 @@ def run(args):
 
             visit_count = visited_poses.get_visit_count(new_pose)
             visit_counts[action] = visit_count
+
+        if measure_timing:
+            print("evaluating actions took {} s".format(timer.restart()))
 
         print("Possible rewards: {}".format(prob_rewards))
 
@@ -254,23 +269,30 @@ def run(args):
 
         new_pose = environment.simulate_action_on_pose(current_pose, action)
         environment.set_pose(new_pose, wait_until_set=True)
+        if measure_timing:
+            print("set_pose took {} s".format(timer.restart()))
 
         # Get current scores
         result = environment.get_mapper().perform_info()
-        scores = np.array([result.score, result.normalized_score,
-                           result.probabilistic_score, result.normalized_probabilistic_score])
+        scores = np.asarray([result.score, result.normalized_score,
+                           result.probabilistic_score, result.normalized_probabilistic_score], dtype=np.float32)
+        if measure_timing:
+            print("perform_info took {} s".format(timer.restart()))
 
         # point_cloud = environment._get_depth_point_cloud(new_pose)
         # result = environment.get_mapper().perform_insert_point_cloud_rpy(
         #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
-        depth_image = environment.get_engine().get_depth_image()
-        full_rgb_image = environment.get_engine().get_rgb_image(scale_factor=1)
-        full_depth_image = environment.get_engine().get_depth_image(scale_factor=1)
-        full_normal_image = environment.get_engine().get_normal_image(scale_factor=1)
+        rgb_image = np.asarray(environment.get_engine().get_rgb_image(), dtype=np.float32)
+        depth_image = np.asarray(environment.get_engine().get_depth_image(), dtype=np.float32)
+        normal_image = np.asarray(environment.get_engine().get_normal_image(), dtype=np.float32)
+        if measure_timing:
+            print("image retrieval took {} s".format(timer.restart()))
 
         # Query octomap
         in_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
                                     map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
+        if measure_timing:
+            print("query_octomap took {} s".format(timer.restart()))
         if args.visualize:
             fig = 1
             import visualization
@@ -283,25 +305,29 @@ def run(args):
         result = environment.get_mapper().perform_insert_depth_map_rpy(
             new_pose.location(), new_pose.orientation_rpy(),
             depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+        if measure_timing:
+            print("insert_depth_map took {} s".format(timer.restart()))
         # print("result diff:", sim_result.probabilistic_reward - result.probabilistic_reward)
         # assert(sim_result.probabilistic_reward - result.probabilistic_reward == 0)
 
         # Query octomap
         out_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
                                      map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
+        if measure_timing:
+            print("query_octomap took {} s".format(timer.restart()))
 
         print("Selected action={}, probabilistic reward={}".format(action, result.probabilistic_reward))
         print("Grid differences:", [np.sum(out_grid_3ds[..., i] - in_grid_3ds[..., i]) for i in xrange(in_grid_3ds.shape[-1])])
 
         # Keep record for saving later
-        rewards = np.array([result.reward, result.normalized_reward,
-                            result.probabilistic_reward, result.normalized_probabilistic_reward])
+        rewards = np.asarray([result.reward, result.normalized_reward,
+                            result.probabilistic_reward, result.normalized_probabilistic_reward], dtype=np.float32)
         # scores = np.array([result.score, result.normalized_score,
         #                    result.probabilistic_score, result.normalized_probabilistic_score])
         record = data_record.RecordV4(intrinsics, map_resolution, axis_mode, forward_factor,
                                       obs_levels, in_grid_3ds, out_grid_3ds,
                                       rewards, scores,
-                                      full_rgb_image, full_depth_image, full_normal_image)
+                                      rgb_image, depth_image, normal_image)
 
         prev_action = action
 
@@ -314,7 +340,8 @@ def run(args):
                 next_file_num, template=filename_template)
             print("Writing records to file {}".format(filename))
             # write_tf_records(filename, records)
-            data_record.write_hdf5_records_v4(filename, records)
+            data_record.write_hdf5_records_v4(filename, records,
+                                              dataset_kwargs={"chunks": True, "compression": "gzip"})
             if check_written_records:
                 print("Reading records from file {}".format(filename))
                 records_read = data_record.read_hdf5_records_v4_as_list(filename)
@@ -331,8 +358,8 @@ def run(args):
                     assert(np.all(record.rewards == record_read.rewards))
                     assert(np.all(record.scores == record_read.scores))
                     assert(np.all(record.rgb_image == record_read.rgb_image))
-                    assert(np.all(record.depth_image == record_read.depth_image))
                     assert(np.all(record.normal_image == record_read.normal_image))
+                    assert(np.all(record.depth_image == record_read.depth_image))
             records = []
 
 

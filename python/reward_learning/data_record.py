@@ -21,10 +21,10 @@ RecordV2Batch = namedtuple("RecordV2Batch", ["obs_levels", "grid_3ds", "rewards"
 RecordV3 = namedtuple("RecordV3", ["obs_levels", "in_grid_3d", "out_grid_3d", "rewards", "scores"])
 RecordV3Batch = namedtuple("RecordV3Batch", ["obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores"])
 
-RecordV4 = namedtuple("RecordV3", ["intrinsics", "map_resolution", "axis_mode", "forward_factor",
+RecordV4 = namedtuple("RecordV4", ["intrinsics", "map_resolution", "axis_mode", "forward_factor",
                                    "obs_levels", "in_grid_3d", "out_grid_3d", "rewards", "scores",
                                    "rgb_image", "depth_image", "normal_image"])
-RecordV4Batch = namedtuple("RecordV3Batch", ["intrinsics", "map_resolution", "axis_mode", "forward_factor"
+RecordV4Batch = namedtuple("RecordV4Batch", ["intrinsics", "map_resolution", "axis_mode", "forward_factor",
                                              "obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores",
                                              "rgb_images", "depth_images", "normal_images"])
 
@@ -149,31 +149,31 @@ def write_hdf5_records_v3(filename, records):
     f.close()
 
 
-def write_hdf5_records_v4(filename, records):
+def write_hdf5_records_v4(filename, records, dataset_kwargs):
     f = h5py.File(filename, "w")
     rec0 = records[0]
     assert(rec0.in_grid_3d.shape[-1] == 2 * len(rec0.obs_levels))
     assert(np.all(rec0.in_grid_3d.shape == rec0.out_grid_3d.shape))
     rewards_shape = (len(records),) + rec0.rewards.shape
-    rewards_dset = f.create_dataset("rewards", rewards_shape, dtype=np.float32)
+    rewards_dset = f.create_dataset("rewards", rewards_shape, dtype=np.float32, **dataset_kwargs)
     scores_shape = (len(records),) + rec0.scores.shape
-    scores_dset = f.create_dataset("scores", scores_shape, dtype=np.float32)
+    scores_dset = f.create_dataset("scores", scores_shape, dtype=np.float32, **dataset_kwargs)
     in_grid_3ds_shape = (len(records),) + rec0.in_grid_3d.shape
-    in_grid_3ds_dset = f.create_dataset("in_grid_3ds", in_grid_3ds_shape, dtype=np.float32)
+    in_grid_3ds_dset = f.create_dataset("in_grid_3ds", in_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
     out_grid_3ds_shape = (len(records),) + rec0.out_grid_3d.shape
-    out_grid_3ds_dset = f.create_dataset("out_grid_3ds", out_grid_3ds_shape, dtype=np.float32)
+    out_grid_3ds_dset = f.create_dataset("out_grid_3ds", out_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
     rgb_image_shape = (len(records),) + rec0.rgb_image.shape
-    rgb_image_dset = f.create_dataset("rgb_images", rgb_image_shape, dtype=np.uint8)
+    rgb_image_dset = f.create_dataset("rgb_images", rgb_image_shape, dtype=np.uint8, **dataset_kwargs)
     depth_image_shape = (len(records),) + rec0.depth_image.shape
-    depth_image_dset = f.create_dataset("depth_images", depth_image_shape, dtype=np.float32)
+    depth_image_dset = f.create_dataset("depth_images", depth_image_shape, dtype=np.float32, **dataset_kwargs)
     normal_image_shape = (len(records),) + rec0.normal_image.shape
-    normal_image_dset = f.create_dataset("normal_images", normal_image_shape, dtype=np.float32)
+    normal_image_dset = f.create_dataset("normal_images", normal_image_shape, dtype=np.float32, **dataset_kwargs)
     f.attrs["obs_levels"] = rec0.obs_levels
     f.attrs["obs_channels"] = out_grid_3ds_shape[-1] / len(rec0.obs_levels)
+    f.attrs["intrinsics"] = rec0.intrinsics
     f.attrs["map_resolution"] = rec0.map_resolution
     f.attrs["axis_mode"] = rec0.axis_mode
     f.attrs["forward_factor"] = rec0.forward_factor
-    f.attrs["intrinsics"] = rec0.intrinsics
     for i, record in enumerate(records):
         assert(np.all(record.intrinsics == rec0.intrinsics))
         assert(record.map_resolution == rec0.map_resolution)
@@ -238,18 +238,30 @@ def read_hdf5_records_v3(filename):
 def read_hdf5_records_v4(filename):
     try:
         f = h5py.File(filename, "r")
+        intrinsics = np.array(f.attrs["intrinsics"])
+        map_resolution = np.array(f.attrs["map_resolution"])
+        axis_mode = np.array(f.attrs["axis_mode"])
+        forward_factor = np.array(f.attrs["forward_factor"])
         obs_levels = np.array(f.attrs["obs_levels"])
         obs_channels = np.array(f.attrs["obs_channels"])
         in_grid_3ds = np.array(f["in_grid_3ds"])
         out_grid_3ds = np.array(f["out_grid_3ds"])
         rewards = np.array(f["rewards"])
         scores = np.array(f["scores"])
+        rgb_images = np.array(f["rgb_images"])
+        depth_images = np.array(f["depth_images"])
+        normal_images = np.array(f["normal_images"])
         f.close()
         assert(in_grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
         assert(np.all(out_grid_3ds.shape == in_grid_3ds.shape))
         assert(rewards.shape[0] == in_grid_3ds.shape[0])
         assert(scores.shape[0] == in_grid_3ds.shape[0])
-        return RecordV3Batch(obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores)
+        assert(rgb_images.shape[0] == in_grid_3ds.shape[0])
+        assert(depth_images.shape[0] == in_grid_3ds.shape[0])
+        assert(normal_images.shape[0] == in_grid_3ds.shape[0])
+        return RecordV4Batch(intrinsics, map_resolution, axis_mode, forward_factor,
+                             obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores,
+                             rgb_images, depth_images, normal_images)
     except Exception, err:
         print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
         raise

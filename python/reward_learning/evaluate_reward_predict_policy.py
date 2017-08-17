@@ -281,6 +281,9 @@ def run_episode(environment, predict_reward,
         i += 1
         # time.sleep(1)
 
+        if i == 70:
+            raw_input("Reached step 70")
+
 
 def run(args):
     # Read config file
@@ -414,10 +417,10 @@ def run(args):
         predicted_reward = output_batch[0, ...]
         return predicted_reward
 
-    # # Raycast heuristic
-    # def predict_reward(pose):
-    #     max_range = 15
-    #     return predict_reward_with_raycast(environment, pose, max_range)
+    # Raycast heuristic
+    def predict_reward(pose):
+        max_range = 15
+        return predict_reward_with_raycast(environment, pose, max_range)
 
     def predict_true_reward(pose):
         return compute_reward(environment, pose, intrinsics, downsample_to_grid=True)
@@ -428,6 +431,7 @@ def run(args):
         plot.get_axes(1).set_ylabel("Reward")
         plot.get_axes(2).set_ylabel("Error")
         plot.get_axes(3).set_ylabel("Relative error")
+        plot.get_axes(3).set_xlabel("Step #")
         plot.show(block=False)
     else:
         plot = None
