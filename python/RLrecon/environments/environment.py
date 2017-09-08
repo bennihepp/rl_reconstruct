@@ -74,7 +74,9 @@ class BaseEnvironment(object):
                  use_ros=True,
                  ros_pose_topic='agent_pose',
                  ros_world_frame='map',
-                 score_bounding_box=None):
+                 score_bounding_box=None,
+                 collision_obs_level=1,
+                 collision_obs_sizes=None):
         """Initialize base environment.
 
         Args:
@@ -96,7 +98,7 @@ class BaseEnvironment(object):
         self._prev_score = 0.0
         self._world_bounding_box = world_bounding_box
         if engine is None:
-            from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+            from pybh.unreal.unreal_cv_wrapper import UnrealCVWrapper
             engine = UnrealCVWrapper()
         self._engine = engine
         if mapper is None:
@@ -124,6 +126,10 @@ class BaseEnvironment(object):
         else:
             self._use_ros = False
         self._score_bounding_box = score_bounding_box
+        self._collision_obs_level = collision_obs_level
+        if collision_obs_sizes is None:
+            collision_obs_sizes = [3, 3, 3]
+        self._collision_obs_sizes = collision_obs_sizes
 
     def _update_pose(self, new_pose, wait_until_set=False):
         """Update pose and publish with ROS"""
@@ -257,11 +263,11 @@ class BaseEnvironment(object):
                 print("Pure rotation -> no collision")
             return False
 
-        obs_level = 1
-        obs_size = 3
         res = self.get_mapper().perform_query_subvolume_rpy(
             new_location, new_pose.orientation_rpy(),
-            obs_level, obs_size, obs_size, obs_size, axis_mode=0)
+            self._collision_obs_level,
+            self._collision_obs_sizes[0], self._collision_obs_sizes[1], self._collision_obs_sizes[2],
+            axis_mode=0)
         occupancies = np.asarray(res.occupancies)
         observation_certainties = np.asarray(res.observation_certainties)
         if np.any(occupancies > 0.3):
