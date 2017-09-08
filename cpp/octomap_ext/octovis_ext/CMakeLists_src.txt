@@ -36,6 +36,7 @@ set(viewerlib_SRCS
 	src/OcTreeDrawer.cpp
 	src/SelectionBox.cpp
 	src/TrajectoryDrawer.cpp
+	src/OcTreeExtDrawer.cpp
 	src/ColorOcTreeDrawer.cpp
 )
 

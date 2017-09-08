@@ -48,6 +48,7 @@
 
 #include <octomap_ext/AbstractOcTree.h>
 #include <octomap_ext/OcTreeBase.h>
+#include <octomap_ext/OcTreeExt.h>
 #include <octovis_ext/OcTreeRecord.h>
 
 namespace octomap {

@@ -27,6 +27,7 @@
 //#include <octomap_ext/octomap_timing.h>
 
 #include <octovis_ext/ViewerGui.h>
+#include <octovis_ext/OcTreeExtDrawer.h>
 #include <octovis_ext/ColorOcTreeDrawer.h>
 #include <octomap_ext/MapCollection.h>
 //Dummy object definition to ensure VS2012 does not drop the StaticMemberInitializer, causing this tree failing to register.
@@ -192,6 +193,9 @@ void ViewerGui::addOctree(octomap::AbstractOcTree* tree, int id, octomap::pose6d
           r->octree_drawer = new OcTreeDrawer();
           //        fprintf(stderr, "adding new OcTreeDrawer for node %d\n", id);
         }
+        else if (dynamic_cast<OcTreeExt*>(tree)) {
+          r->octree_drawer = new OcTreeExtDrawer();
+        }
         else if (dynamic_cast<ColorOcTree*>(tree)) {
           r->octree_drawer = new ColorOcTreeDrawer();
         } else{
@@ -215,6 +219,9 @@ void ViewerGui::addOctree(octomap::AbstractOcTree* tree, int id, octomap::pose6d
         if (dynamic_cast<OcTree*>(tree)) {
           otr.octree_drawer = new OcTreeDrawer();
           //        fprintf(stderr, "adding new OcTreeDrawer for node %d\n", id);
+        }
+        else if (dynamic_cast<OcTreeExt*>(tree)) {
+          otr.octree_drawer = new OcTreeExtDrawer();
         }
         else if (dynamic_cast<ColorOcTree*>(tree)) {
           otr.octree_drawer = new ColorOcTreeDrawer();

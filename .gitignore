@@ -99,3 +99,9 @@ ENV/
 
 # mypy
 .mypy_cache/
+
+# Cmake
+cmake-build-debug/
+
+# IDEA
+.idea/
