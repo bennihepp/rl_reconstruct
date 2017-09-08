@@ -116,7 +116,7 @@ def run(args):
     num_records = num_files * records_per_file
     reset_interval = args.reset_interval
     reset_score_threshold = args.reset_score_threshold
-    check_written_records = False
+    check_written_records = True
 
     epsilon = args.epsilon
 
@@ -137,15 +137,19 @@ def run(args):
     print("axis_mode={}".format(axis_mode))
     print("forward_factor={}".format(forward_factor))
 
-    environment_class = env_factory.get_environment_class_by_name(args.environment)
     client_id = args.client_id
-    environment = env_factory.create_environment(environment_class, client_id)
+    # environment_class = env_factory.get_environment_class_by_name(args.environment)
+    # environment = env_factory.create_environment(environment_class, client_id)
+    environment_config_file = args.environment_config
+    environment = env_factory.create_environment_from_yaml(environment_config_file, client_id)
 
     # environment.get_engine().test()
+    environment.get_engine().disable_input()
 
     intrinsics = environment.get_engine().get_intrinsics()
     result = environment.get_mapper().perform_info()
     map_resolution = result.resolution
+    downsample_to_grid = args.downsample_to_grid
 
     if args.manual:
         import time
@@ -160,7 +164,7 @@ def run(args):
             depth_image = environment.get_engine().get_depth_image()
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 current_pose.location(), current_pose.orientation_rpy(),
-                depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+                depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=False)
 
             time.sleep(1)
         return
@@ -218,7 +222,7 @@ def run(args):
                 print("  simulate depth map retrieval took {} s".format(timer.restart()))
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 new_pose.location(), new_pose.orientation_rpy(),
-                depth_image, intrinsics, downsample_to_grid=True, simulate=True)
+                depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=True)
             if measure_timing:
                 print("  simulate insert depth map took {} s".format(timer.restart()))
             prob_reward = result.probabilistic_reward
@@ -301,10 +305,10 @@ def run(args):
 
         # sim_result = environment.get_mapper().perform_insert_depth_map_rpy(
         #     new_pose.location(), new_pose.orientation_rpy(),
-        #     depth_image, intrinsics, downsample_to_grid=True, simulate=True)
+        #     depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=True)
         result = environment.get_mapper().perform_insert_depth_map_rpy(
             new_pose.location(), new_pose.orientation_rpy(),
-            depth_image, intrinsics, downsample_to_grid=True, simulate=False)
+            depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=False)
         if measure_timing:
             print("insert_depth_map took {} s".format(timer.restart()))
         # print("result diff:", sim_result.probabilistic_reward - result.probabilistic_reward)
@@ -373,9 +377,11 @@ if __name__ == '__main__':
     parser.add_argument('--obs-size', default=16, type=int)
     parser.add_argument('--records-per-file', default=1000, type=int, help="Samples per file")
     parser.add_argument('--num-files', default=100, type=int, help="Number of files")
-    parser.add_argument('--environment', type=str, required=True, help="Environment name")
+    parser.add_argument('--environment-config', type=str, required=True, help="Environment configuration file")
     parser.add_argument('--reset-interval', default=100, type=int)
     parser.add_argument('--reset-score-threshold', default=0.3, type=float)
+    parser.add_argument('--downsample-to-grid', default=False, type=argparse_bool,
+                        help="Whether raycast should be downsampled to a spherical grid on octomap server")
     parser.add_argument('--epsilon', default=0.2, type=float)
     parser.add_argument('--axis-mode', default=0, type=int)
     parser.add_argument('--forward-factor', default=3 / 8., type=float)
