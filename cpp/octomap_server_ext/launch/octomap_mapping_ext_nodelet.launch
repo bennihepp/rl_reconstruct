@@ -35,7 +35,7 @@
     <param name="use_only_surface_voxels_for_score" value="true" type="bool" />
 
     <!-- name of file with surface voxel positions -->
-    <param name="surface_voxel_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/surface_voxels.txt" type="str" />
+    <param name="surface_voxels_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/surface_voxels.txt" type="str" />
 
   </node>
 </launch>

@@ -2,8 +2,12 @@
 
   <arg name="surface_voxels_filename" default="" />
   <arg name="binary_surface_voxels_filename" default="" />
-  <arg name="voxel_size" default="0.25" />
-  <arg name="max_range" default="15.0" />
+  <arg name="voxel_size" />
+  <arg name="max_range" />
+  <arg name="use_only_surface_voxels_for_score" />
+  <arg name="observation_count_saturation" />
+  <arg name="voxel_occupied_threshold" />
+  <arg name="voxel_free_threshold" />
 
   <node name="octomap_server_ext" pkg="octomap_server_ext" type="octomap_server_ext_node" output="screen">
 
@@ -32,16 +36,15 @@
     <param name="score_per_surface_voxel" value="1.0" type="double" />
 
     <!-- occupancy threshold below which a voxel is considered to be free -->
-    <param name="voxel_free_threshold" value="0.25" type="double" />
+    <param name="voxel_free_threshold" value="$(arg voxel_free_threshold)" type="double" />
 
     <!-- occupancy threshold above which a voxel is considered to be occupied -->
-    <param name="voxel_occupied_threshold" value="0.75" type="double" />
+    <param name="voxel_occupied_threshold" value="$(arg voxel_occupied_threshold)" type="double" />
 
     <!-- whether to only consider surface voxels for score and reward -->
-    <param name="use_only_surface_voxels_for_score" value="true" type="bool" />
+    <param name="use_only_surface_voxels_for_score" value="$(arg use_only_surface_voxels_for_score)" type="bool" />
 
     <!-- name of file with surface voxel positions -->
-    <!-- <param name="surface_voxels_filename" value="/home/t-behepp/Documents/Unreal Projects/CustomScenes/Export/medieval_building/surface_voxels.txt" type="str" /> -->
     <param name="surface_voxels_filename" value="$(arg surface_voxels_filename)" type="str" />
     <param name="binary_surface_voxels_filename" value="$(arg binary_surface_voxels_filename)" type="str" />
 
@@ -50,7 +53,7 @@
     <param name="spherical_grid_pitch_step_degrees" value="2" type="double" />
 
     <!-- Observation count saturation -->
-    <param name="observation_count_saturation" value="3.0" type="double" />
+    <param name="observation_count_saturation" value="$(arg observation_count_saturation)" type="double" />
 
     <!-- Latch messages? -->
     <param name="latch" value="false" type="bool" />

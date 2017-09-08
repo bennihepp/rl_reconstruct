@@ -185,7 +185,7 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   }
 
   private_nh.param("use_only_surface_voxels_for_score", m_useOnlySurfaceVoxelsForScore, m_useOnlySurfaceVoxelsForScore);
-  private_nh.param("binary_surface_voxel_filename", m_binarySurfaceVoxelsFilename, m_binarySurfaceVoxelsFilename);
+  private_nh.param("binary_surface_voxels_filename", m_binarySurfaceVoxelsFilename, m_binarySurfaceVoxelsFilename);
   private_nh.param("surface_voxel_filename", m_surfaceVoxelsFilename, m_surfaceVoxelsFilename);
   if (m_surfaceVoxelsFilename.empty() && m_binarySurfaceVoxelsFilename.empty()) {
     ROS_WARN("No surface voxel file specified");
@@ -196,7 +196,7 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
     readBinarySurfaceVoxels(m_surfaceVoxelsFilename);
   }
   else if (!m_binarySurfaceVoxelsFilename.empty()) {
-    ROS_INFO_STREAM("binary_surface_voxel_filename: " << m_binarySurfaceVoxelsFilename);
+    ROS_INFO_STREAM("binary_surface_voxels_filename: " << m_binarySurfaceVoxelsFilename);
     readBinarySurfaceVoxels(m_binarySurfaceVoxelsFilename);
   }
   else {
@@ -919,6 +919,7 @@ bool OctomapServerExt::insertDepthMapSrv(InsertDepthMap::Request &req, InsertDep
 
   PCLPointCloud pc = depthMapToPointCloud(req.height, req.width, req.stride, req.depths,
                                           intrinsics, req.downsample_to_grid);
+
   if (req.downsample_to_grid) {
     for (const PixelCoordinate& coord : m_spherical_grid_acc.grid_pixel_coordinates) {
       geometry_msgs::Point32 point;
@@ -940,6 +941,10 @@ bool OctomapServerExt::insertDepthMapSrv(InsertDepthMap::Request &req, InsertDep
 
   // directly transform to map frame:
   pcl::transformPointCloud(pc, pc, sensor_to_world);
+  // For debugging
+//  for (PCLPointCloud::const_iterator it = pc.begin(); it != pc.end(); ++it) {
+//    std::cout << "point: (" << it->x << ", " << it->y << ", " << it->z << ")" << std::endl;
+//  }
 
   InsertPointCloudResult ipc_res = insertPointCloud(sensor_to_world_tf.getOrigin(), pc, req.simulate);
 
@@ -2599,8 +2604,12 @@ bool OctomapServerExt::setScoreBoundingBoxSrv(SetScoreBoundingBox::Request& req,
 bool OctomapServerExt::infoSrv(Info::Request &req, Info::Response &res) {
   res.tree_type = m_octree->getTreeType();
   res.resolution = m_octree->getResolution();
+  res.max_range = m_maxRange;
   res.num_nodes = m_octree->size();
   res.num_leaf_nodes = m_octree->getNumLeafNodes();
+  res.use_only_surface_voxels_for_score = m_useOnlySurfaceVoxelsForScore;
+  res.surface_voxels_filename = m_surfaceVoxelsFilename;
+  res.binary_surface_voxels_filename = m_binarySurfaceVoxelsFilename;
 
   res.occupancy_clamp_min = m_octree->getClampingThresMin();
   res.occupancy_clamp_max = m_octree->getClampingThresMax();

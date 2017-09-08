@@ -2,8 +2,12 @@
 string tree_type
 
 float64 resolution
+float64 max_range
 int64 num_nodes
 int64 num_leaf_nodes
+bool use_only_surface_voxels_for_score
+string surface_voxels_filename
+string binary_surface_voxels_filename
 
 float64 occupancy_clamp_min
 float64 occupancy_clamp_max
