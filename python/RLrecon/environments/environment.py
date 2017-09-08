@@ -679,7 +679,7 @@ class HorizontalEnvironment(Environment):
         min_location = center_location - 0.5 * location_range
         while not valid_location:
             location = min_location + np.random.rand(3) * location_range
-            location[2] = 3.0
+            location[2] = 3.1
             # valid_location = np.linalg.norm(location) >= 8
             valid_location = not self.get_score_bounding_box().contains(location)
             if not valid_location:

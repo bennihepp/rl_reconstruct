@@ -48,18 +48,15 @@ def plot_grid(occupancies_3d, observation_certainties_3d):
 
 
 def query_octomap(environment, pose, obs_levels, obs_sizes, map_resolution, axis_mode=0, forward_factor=3 / 8.):
-    obs_sizes_x = obs_sizes[0]
-    obs_sizes_y = obs_sizes[1]
-    obs_sizes_z = obs_sizes[2]
     grid_3ds = None
     for k in xrange(len(obs_levels)):
         obs_level = obs_levels[k]
-        obs_size_x = obs_sizes_x[k]
-        obs_size_y = obs_sizes_y[k]
-        obs_size_z = obs_sizes_z[k]
+        obs_size_x = obs_sizes[k][0]
+        obs_size_y = obs_sizes[k][1]
+        obs_size_z = obs_sizes[k][2]
 
         obs_resolution = map_resolution * (2 ** obs_level)
-        offset_x = obs_resolution * obs_sizes_x[0] * forward_factor
+        offset_x = obs_resolution * obs_size_x * forward_factor
         offset_vec = math_utils.rotate_vector_with_rpy(pose.orientation_rpy(), [offset_x, 0, 0])
         query_location = pose.location() + offset_vec
         query_pose = environment.Pose(query_location, pose.orientation_rpy())
@@ -120,26 +117,17 @@ def run(args):
 
     epsilon = args.epsilon
 
-    obs_levels = [int(x) for x in args.obs_levels.strip("[]").split(",")]
-    obs_size = args.obs_size
-    # obs_levels = [0, 1, 2, 3]
-    # obs_levels = [1]
-    obs_sizes_x = [obs_size] * len(obs_levels)
-    obs_sizes_y = obs_sizes_x
-    obs_sizes_z = obs_sizes_x
-    obs_sizes = [obs_sizes_x, obs_sizes_y, obs_sizes_z]
+    obs_levels = [int(x.strip()) for x in args.obs_levels.strip("[]").split(",")]
+    obs_sizes = [int(x.strip()) for x in args.obs_sizes.strip("[]").split(",")]
+    obs_sizes = [obs_sizes] * len(obs_levels)
     axis_mode = args.axis_mode
     forward_factor = args.forward_factor
-    # axis_mdoe = 1
-    # forward_factor = 0.
     print("obs_levels={}".format(obs_levels))
-    print("obs_size={}".format(obs_size))
+    print("obs_sizes={}".format(obs_sizes))
     print("axis_mode={}".format(axis_mode))
     print("forward_factor={}".format(forward_factor))
 
     client_id = args.client_id
-    # environment_class = env_factory.get_environment_class_by_name(args.environment)
-    # environment = env_factory.create_environment(environment_class, client_id)
     environment_config_file = args.environment_config
     environment = env_factory.create_environment_from_yaml(environment_config_file, client_id)
 
@@ -374,7 +362,7 @@ if __name__ == '__main__':
     parser.add_argument('--dry-run', action='store_true', help="Do not save anything")
     parser.add_argument('--output-path', type=str, help="Output path")
     parser.add_argument('--obs-levels', default="0,1,2,3,4", type=str)
-    parser.add_argument('--obs-size', default=16, type=int)
+    parser.add_argument('--obs-sizes', default="16,16,16", type=str)
     parser.add_argument('--records-per-file', default=1000, type=int, help="Samples per file")
     parser.add_argument('--num-files', default=100, type=int, help="Number of files")
     parser.add_argument('--environment-config', type=str, required=True, help="Environment configuration file")

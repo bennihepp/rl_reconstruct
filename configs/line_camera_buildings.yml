@@ -10,8 +10,10 @@ unreal:
     /Game/maps/houses
   map_name: buildings
   #map_name: medieval_building
-  width: 320
-  height: 240
+  #width: 320
+  #height: 240
+  width: 160
+  height: 120
   fps: 20
 
 octomap:
@@ -30,8 +32,8 @@ camera:
   height: 1
   fov: 90.0
 
-world_bounding_box: [[-18, -20, 3.0], [+23, +18, 3.1]]
-score_bounding_box: [[-14, -17.5, 3.0], [+19.5, +15, 3.1]]
+world_bounding_box: [[-18, -20, 3.1], [+23, +18, 3.1]]
+score_bounding_box: [[-14, -17.5, 3.1], [+19.5, +15, 3.1]]
 
 collision:
   obs_level: 1
@@ -39,7 +41,7 @@ collision:
 
 collect_data:
   obs_levels: [0, 1, 2, 3, 4]
-  obs_size: 16
+  obs_sizes: [16, 16, 1]
   reset_interval: 500
   reset_score_threshold: 0.5
   downsample_to_grid: False

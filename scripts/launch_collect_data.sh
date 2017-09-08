@@ -48,7 +48,7 @@ MAP=$MAP_PATH/$MAP_NAME
 RESET_INTERVAL=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.reset_interval --type int`
 RESET_SCORE_THRESHOLD=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.reset_score_threshold --type float`
 OBS_LEVELS=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.obs_levels --type str`
-OBS_SIZE=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.obs_size --type int`
+OBS_SIZES=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.obs_sizes`
 DOWNSAMPLE_TO_GRID=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG collect_data.downsample_to_grid --type bool`
 
 # Retrieve octomap_server_ext parameters from YAML config
@@ -106,17 +106,18 @@ tmux send-keys -t $SESSION:3 "roslaunch octomap_server_ext $LAUNCH_FILE " \
 
 tmux send-keys -t $SESSION:4 "export ROS_MASTER_URI='http://localhost:$ROSCORE_PORT/'" C-m
 tmux send-keys -t $SESSION:4 "sleep 20" C-m
-tmux send-keys -t $SESSION:4 "python $HOME/rl_reconstruct/python/reward_learning/collect_data.py " \
+tmux send-keys -t $SESSION:4 "while true; do python $HOME/rl_reconstruct/python/reward_learning/collect_data.py " \
   "--output-path $OUTPUT_PATH " \
   "--obs-levels \"$OBS_LEVELS\" " \
-  "--obs-size $OBS_SIZE " \
+  "--obs-sizes \"$OBS_SIZES\" " \
   "--environment-config $ENVIRONMENT_CONFIG " \
   "--client-id $ID " \
   "--records-per-file $RECORDS_PER_FILE " \
   "--num-files $NUM_FILES " \
   "--reset-interval $RESET_INTERVAL " \
   "--reset-score-threshold $RESET_SCORE_THRESHOLD " \
-  "--downsample-to-grid $DOWNSAMPLE_TO_GRID" C-m
+  "--downsample-to-grid $DOWNSAMPLE_TO_GRID; " \
+  "sleep 1; done" C-m
 
 tmux attach -t $SESSION:4
 
