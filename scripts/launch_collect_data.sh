@@ -64,7 +64,7 @@ USE_ONLY_SURFACE_VOXELS_FOR_SCORE=`python -m pybh.tools.read_yaml_value $ENVIRON
 
 ENVIRONMENT_CLASS=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG environment_class`
 SCENE_NAME=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG unreal.scene_name`
-OUTPUT_PATH="$HOME/reward_learning/datasets/line_camera/in_out_grid_16x16x16_0-1-2-3-4_${ENVIRONMENT_CLASS}_${SCENE_NAME}_${MAP_NAME}_greedy/${ID}"
+OUTPUT_PATH="$HOME/reward_learning/datasets/line_camera/in_out_grid_16x16x16_0-1-2-3-4_${ENVIRONMENT_CLASS}_${SCENE_NAME}_${MAP_NAME}_greedy/data_${ID}"
 
 # Copy environment config to output path
 mkdir -p $OUTPUT_PATH/config
