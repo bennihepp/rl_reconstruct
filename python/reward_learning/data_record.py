@@ -275,7 +275,7 @@ def read_hdf5_records_v4(filename):
                              obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores,
                              rgb_images, depth_images, normal_images)
     except Exception, err:
-        print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
+        print("ERROR: Exception raised when reading as HDF5 v4 file \"{}\": {}".format(filename, err))
         raise
 
 

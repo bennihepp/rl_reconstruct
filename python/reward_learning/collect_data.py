@@ -137,31 +137,67 @@ def run(args):
     environment_config_file = args.environment_config
     environment = env_factory.create_environment_from_yaml(environment_config_file, client_id)
 
-    # environment.get_engine().test()
-    environment.get_engine().disable_input()
-
     intrinsics = environment.get_engine().get_intrinsics()
     result = environment.get_mapper().perform_info()
     map_resolution = result.resolution
     downsample_to_grid = args.downsample_to_grid
 
     if args.manual:
+        environment.get_engine().enable_input()
+
         import time
         environment.reset(keep_pose=True)
         while True:
             current_pose = environment.get_pose()
+
+            rgb_image, depth_image, normal_image = environment.get_engine().get_rgb_depth_normal_images()
+            rgb_image = np.asarray(rgb_image, dtype=np.float32)
+            depth_image = np.asarray(depth_image, dtype=np.float32)
+            normal_image = np.asarray(normal_image, dtype=np.float32)
+
+            if args.visualize:
+                if depth_image.shape[0] == 1:
+                    import matplotlib.pyplot as plt
+                    fig = plt.figure(1)
+                    plt.clf()
+                    plt.step(np.arange(depth_image.shape[1]), depth_image[0, ...])
+                    plt.title("Depth image")
+                    fig.canvas.draw()
+                    plt.show(block=False)
+                else:
+                    import cv2
+                    cv2.imshow("depth_image", depth_image / np.max(depth_image))
+                    cv2.waitKey(50)
+
+                    import matplotlib.pyplot as plt
+                    fig = plt.figure(1)
+                    plt.clf()
+                    i = depth_image.shape[0] / 2
+                    print(i)
+                    i = int(i)
+                    plt.step(np.arange(depth_image.shape[1]), depth_image[i, ...])
+                    plt.title("Depth image")
+                    fig.canvas.draw()
+                    plt.show(block=False)
+
             # Query octomap
             in_grid_3ds = query_octomap(environment, current_pose, obs_levels, obs_sizes,
                                         map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
-            plot_grid(in_grid_3ds[..., 0], in_grid_3ds[..., 1])
+            if args.visualize:
+                fig = 1
+                import visualization
+                visualization.plot_grid(in_grid_3ds[..., 0], in_grid_3ds[..., 1], title_prefix="input", show=False, fig_offset=fig)
+                visualization.show(stop=True)
 
-            depth_image = environment.get_engine().get_depth_image()
             result = environment.get_mapper().perform_insert_depth_map_rpy(
                 current_pose.location(), current_pose.orientation_rpy(),
                 depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=False)
 
-            time.sleep(1)
+            time.sleep(0.5)
         return
+
+    # environment.get_engine().test()
+    environment.get_engine().disable_input()
 
     next_file_num = 0
     records = []
@@ -279,14 +315,27 @@ def run(args):
         if measure_timing:
             print("perform_info took {} s".format(timer.restart()))
 
-        # point_cloud = environment._get_depth_point_cloud(new_pose)
-        # result = environment.get_mapper().perform_insert_point_cloud_rpy(
-        #     new_pose.location(), new_pose.orientation_rpy(), point_cloud, simulate=True)
-        rgb_image = np.asarray(environment.get_engine().get_rgb_image(), dtype=np.float32)
-        depth_image = np.asarray(environment.get_engine().get_depth_image(), dtype=np.float32)
-        normal_image = np.asarray(environment.get_engine().get_normal_image(), dtype=np.float32)
+        rgb_image, depth_image, normal_image = environment.get_engine().get_rgb_depth_normal_images()
+        rgb_image = np.asarray(rgb_image, dtype=np.float32)
+        depth_image = np.asarray(depth_image, dtype=np.float32)
+        normal_image = np.asarray(normal_image, dtype=np.float32)
         if measure_timing:
             print("image retrieval took {} s".format(timer.restart()))
+
+        if args.visualize:
+            if depth_image.shape[0] == 1:
+                import matplotlib.pyplot as plt
+                fig = plt.figure(1)
+                plt.clf()
+                # plt.plot(np.arange(depth_image.shape[1]), depth_image[0, ...])
+                plt.step(np.arange(depth_image.shape[1]), depth_image[0, ...])
+                plt.title("Depth image")
+                fig.canvas.draw()
+                plt.show(block=False)
+            else:
+                import cv2
+                cv2.imshow("depth_image", depth_image / np.max(depth_image))
+                cv2.waitKey(50)
 
         # Query octomap
         in_grid_3ds = query_octomap(environment, new_pose, obs_levels, obs_sizes,
@@ -331,34 +380,34 @@ def run(args):
 
         prev_action = action
 
-        if not args.dry_run:
-            records.append(record)
+        records.append(record)
 
-        if not args.dry_run and len(records) % records_per_file == 0:
+        if len(records) % records_per_file == 0:
             # filename, next_file_num = get_next_output_tf_filename(next_file_num)
             filename, next_file_num = file_helpers.get_next_output_hdf5_filename(
                 next_file_num, template=filename_template)
             print("Writing records to file {}".format(filename))
             # write_tf_records(filename, records)
-            data_record.write_hdf5_records_v4(filename, records, dataset_kwargs=dataset_kwargs)
-            if check_written_records:
-                print("Reading records from file {}".format(filename))
-                records_read = data_record.read_hdf5_records_v4_as_list(filename)
-                for record, record_read in zip(records, records_read):
-                    assert(np.all(record.intrinsics == record_read.intrinsics))
-                    assert(record.map_resolution == record_read.map_resolution)
-                    assert(record.axis_mode == record_read.axis_mode)
-                    assert(record.forward_factor == record_read.forward_factor)
-                    assert(np.all(record.obs_levels == record_read.obs_levels))
-                    for in_grid_3d, in_grid_3d_read in zip(record.in_grid_3d, record_read.in_grid_3d):
-                        assert(np.all(in_grid_3d == in_grid_3d_read))
-                    for out_grid_3d, out_grid_3d_read in zip(record.out_grid_3d, record_read.out_grid_3d):
-                        assert(np.all(out_grid_3d == out_grid_3d_read))
-                    assert(np.all(record.rewards == record_read.rewards))
-                    assert(np.all(record.scores == record_read.scores))
-                    assert(np.all(record.rgb_image == record_read.rgb_image))
-                    assert(np.all(record.normal_image == record_read.normal_image))
-                    assert(np.all(record.depth_image == record_read.depth_image))
+            if not args.dry_run:
+                data_record.write_hdf5_records_v4(filename, records, dataset_kwargs=dataset_kwargs)
+                if check_written_records:
+                    print("Reading records from file {}".format(filename))
+                    records_read = data_record.read_hdf5_records_v4_as_list(filename)
+                    for record, record_read in zip(records, records_read):
+                        assert(np.all(record.intrinsics == record_read.intrinsics))
+                        assert(record.map_resolution == record_read.map_resolution)
+                        assert(record.axis_mode == record_read.axis_mode)
+                        assert(record.forward_factor == record_read.forward_factor)
+                        assert(np.all(record.obs_levels == record_read.obs_levels))
+                        for in_grid_3d, in_grid_3d_read in zip(record.in_grid_3d, record_read.in_grid_3d):
+                            assert(np.all(in_grid_3d == in_grid_3d_read))
+                        for out_grid_3d, out_grid_3d_read in zip(record.out_grid_3d, record_read.out_grid_3d):
+                            assert(np.all(out_grid_3d == out_grid_3d_read))
+                        assert(np.all(record.rewards == record_read.rewards))
+                        assert(np.all(record.scores == record_read.scores))
+                        assert(np.all(record.rgb_image == record_read.rgb_image))
+                        assert(np.all(record.normal_image == record_read.normal_image))
+                        assert(np.all(record.depth_image == record_read.depth_image))
             records = []
 
 
@@ -381,7 +430,7 @@ if __name__ == '__main__':
     parser.add_argument('--axis-mode', default=0, type=int)
     parser.add_argument('--forward-factor', default=3 / 8., type=float)
     parser.add_argument('--client-id', default=0, type=int)
-    parser.add_argument('--wait-until-pose-set', type=argparse_bool, default=False,
+    parser.add_argument('--wait-until-pose-set', type=argparse_bool, default=True,
                         help="Wait until pose is set in Unreal Engine")
     parser.add_argument('--measure-timing', type=argparse_bool, default=False, help="Measure timing of steps")
     parser.add_argument('--visualize', type=argparse_bool, default=False)
