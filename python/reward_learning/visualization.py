@@ -4,13 +4,20 @@ import numpy as np
 import mayavi.mlab as mlab
 
 
+def clear_figure(fig=None):
+    mlab.clf(figure=fig)
+
+
 def get_xyz_grids(grid, scale=1.0):
     x, y, z = scale * np.mgrid[:grid.shape[0], :grid.shape[1], :grid.shape[2]]
     return x, y, z
 
 
-def create_mlab_figure(width=640, height=480, fig=None):
-    return mlab.figure(figure=fig, size=(width, height))
+def create_mlab_figure(width=640, height=480, fig=None, clear=True):
+    fig = mlab.figure(figure=fig, size=(width, height))
+    if clear:
+        clear_figure(fig)
+    return fig
 
 
 def get_point_cloud_extent(x, y, z, margin=0.1):

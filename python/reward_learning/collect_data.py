@@ -181,11 +181,13 @@ def run(args):
                     plt.show(block=False)
 
             # Query octomap
+            print("current_pose: {}".format(current_pose.orientation_rpy()))
             in_grid_3ds = query_octomap(environment, current_pose, obs_levels, obs_sizes,
                                         map_resolution, axis_mode=axis_mode, forward_factor=forward_factor)
             if args.visualize:
                 fig = 1
                 import visualization
+                visualization.clear_figure(fig)
                 visualization.plot_grid(in_grid_3ds[..., 0], in_grid_3ds[..., 1], title_prefix="input", show=False, fig_offset=fig)
                 visualization.show(stop=True)
 
@@ -345,7 +347,9 @@ def run(args):
         if args.visualize:
             fig = 1
             import visualization
-            visualization.plot_grid(in_grid_3ds[..., 4], in_grid_3ds[..., 5], title_prefix="input", show=False, fig_offset=fig)
+            fig = visualization.plot_grid(in_grid_3ds[..., 2], in_grid_3ds[..., 3], title_prefix="input_1", show=False, fig_offset=fig)
+            visualization.clear_figure(fig)
+            visualization.plot_grid(in_grid_3ds[..., 4], in_grid_3ds[..., 5], title_prefix="input_2", show=False, fig_offset=fig)
             visualization.show(stop=True)
 
         # sim_result = environment.get_mapper().perform_insert_depth_map_rpy(
