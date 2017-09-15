@@ -149,25 +149,37 @@ def write_hdf5_records_v3(filename, records):
     f.close()
 
 
+def create_dataset_with_fixed_chunks(f, name, shape, dtype=None, **kwargs):
+    record_size = 4 * reduce(int.__mul__, shape[1:])
+    chunk_records = 1024 * 1024 / record_size
+    chunk_records = min(shape[0], chunk_records)
+    if chunk_records == 0:
+        chunk_records = 1
+    chunks = (chunk_records,) + shape[1:]
+    # print("chunks:", chunks)
+    maxshape = shape
+    return f.create_dataset(name, shape, dtype=dtype, chunks=chunks, maxshape=maxshape, **kwargs)
+
+
 def write_hdf5_records_v4(filename, records, dataset_kwargs):
     f = h5py.File(filename, "w")
     rec0 = records[0]
     assert(rec0.in_grid_3d.shape[-1] == 2 * len(rec0.obs_levels))
     assert(np.all(rec0.in_grid_3d.shape == rec0.out_grid_3d.shape))
     rewards_shape = (len(records),) + rec0.rewards.shape
-    rewards_dset = f.create_dataset("rewards", rewards_shape, dtype=np.float32, **dataset_kwargs)
+    rewards_dset = create_dataset_with_fixed_chunks(f, "rewards", rewards_shape, dtype=np.float32, **dataset_kwargs)
     scores_shape = (len(records),) + rec0.scores.shape
-    scores_dset = f.create_dataset("scores", scores_shape, dtype=np.float32, **dataset_kwargs)
+    scores_dset = create_dataset_with_fixed_chunks(f, "scores", scores_shape, dtype=np.float32, **dataset_kwargs)
     in_grid_3ds_shape = (len(records),) + rec0.in_grid_3d.shape
-    in_grid_3ds_dset = f.create_dataset("in_grid_3ds", in_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
+    in_grid_3ds_dset = create_dataset_with_fixed_chunks(f, "in_grid_3ds", in_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
     out_grid_3ds_shape = (len(records),) + rec0.out_grid_3d.shape
-    out_grid_3ds_dset = f.create_dataset("out_grid_3ds", out_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
+    out_grid_3ds_dset = create_dataset_with_fixed_chunks(f, "out_grid_3ds", out_grid_3ds_shape, dtype=np.float32, **dataset_kwargs)
     rgb_image_shape = (len(records),) + rec0.rgb_image.shape
-    rgb_image_dset = f.create_dataset("rgb_images", rgb_image_shape, dtype=np.uint8, **dataset_kwargs)
+    rgb_image_dset = create_dataset_with_fixed_chunks(f, "rgb_images", rgb_image_shape, dtype=np.uint8, **dataset_kwargs)
     depth_image_shape = (len(records),) + rec0.depth_image.shape
-    depth_image_dset = f.create_dataset("depth_images", depth_image_shape, dtype=np.float32, **dataset_kwargs)
+    depth_image_dset = create_dataset_with_fixed_chunks(f, "depth_images", depth_image_shape, dtype=np.float32, **dataset_kwargs)
     normal_image_shape = (len(records),) + rec0.normal_image.shape
-    normal_image_dset = f.create_dataset("normal_images", normal_image_shape, dtype=np.float32, **dataset_kwargs)
+    normal_image_dset = create_dataset_with_fixed_chunks(f, "normal_images", normal_image_shape, dtype=np.float32, **dataset_kwargs)
     f.attrs["obs_levels"] = rec0.obs_levels
     f.attrs["obs_channels"] = out_grid_3ds_shape[-1] / len(rec0.obs_levels)
     f.attrs["intrinsics"] = rec0.intrinsics

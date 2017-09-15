@@ -101,7 +101,8 @@ def query_octomap(environment, pose, obs_levels, obs_sizes, map_resolution, axis
 
 def run(args):
     timer = Timer()
-    measure_timing = False
+    wait_until_pose_set = args.wait_until_pose_set
+    measure_timing = args.measure_timing
 
     output_path = args.output_path
     if not os.path.isdir(output_path):
@@ -113,7 +114,12 @@ def run(args):
     num_records = num_files * records_per_file
     reset_interval = args.reset_interval
     reset_score_threshold = args.reset_score_threshold
-    check_written_records = True
+    check_written_records = args.check_written_records
+
+    dataset_kwargs = {}
+    if args.compression_level >= 0:
+        dataset_kwargs.update({"compression": "gzip",
+                               "compression_opts": args.compression_level})
 
     epsilon = args.epsilon
 
@@ -193,13 +199,15 @@ def run(args):
         visit_counts = np.zeros((environment.get_num_of_actions(),))
         collision_flags = np.zeros((environment.get_num_of_actions(),))
         for action in xrange(environment.get_num_of_actions()):
-            if environment.is_action_colliding(current_pose, action):
-                print("Action {} would collide".format(action))
-                collision_flags[action] = 1
+            colliding = environment.is_action_colliding(current_pose, action)
             if measure_timing:
                 print("  simulate collision check took {} s".format(timer.restart()))
+            if colliding:
+                print("Action {} would collide".format(action))
+                collision_flags[action] = 1
+                continue
             new_pose = environment.simulate_action_on_pose(current_pose, action)
-            environment.set_pose(new_pose, wait_until_set=True)
+            environment.set_pose(new_pose, wait_until_set=wait_until_pose_set)
             if measure_timing:
                 print("  simulate set_pose took {} s".format(timer.restart()))
             # point_cloud = environment._get_depth_point_cloud(new_pose)
@@ -260,7 +268,7 @@ def run(args):
             continue
 
         new_pose = environment.simulate_action_on_pose(current_pose, action)
-        environment.set_pose(new_pose, wait_until_set=True)
+        environment.set_pose(new_pose, wait_until_set=wait_until_pose_set)
         if measure_timing:
             print("set_pose took {} s".format(timer.restart()))
 
@@ -332,8 +340,7 @@ def run(args):
                 next_file_num, template=filename_template)
             print("Writing records to file {}".format(filename))
             # write_tf_records(filename, records)
-            data_record.write_hdf5_records_v4(filename, records,
-                                              dataset_kwargs={"chunks": True, "compression": "gzip"})
+            data_record.write_hdf5_records_v4(filename, records, dataset_kwargs=dataset_kwargs)
             if check_written_records:
                 print("Reading records from file {}".format(filename))
                 records_read = data_record.read_hdf5_records_v4_as_list(filename)
@@ -360,7 +367,7 @@ if __name__ == '__main__':
     # parser.add_argument('-v', '--verbose', action='count', dest='verbosity', default=0, help='Set verbosity.')
     parser.add_argument('--manual', action='store_true')
     parser.add_argument('--dry-run', action='store_true', help="Do not save anything")
-    parser.add_argument('--output-path', type=str, help="Output path")
+    parser.add_argument('--output-path', required=True, type=str, help="Output path")
     parser.add_argument('--obs-levels', default="0,1,2,3,4", type=str)
     parser.add_argument('--obs-sizes', default="16,16,16", type=str)
     parser.add_argument('--records-per-file', default=1000, type=int, help="Samples per file")
@@ -374,7 +381,13 @@ if __name__ == '__main__':
     parser.add_argument('--axis-mode', default=0, type=int)
     parser.add_argument('--forward-factor', default=3 / 8., type=float)
     parser.add_argument('--client-id', default=0, type=int)
+    parser.add_argument('--wait-until-pose-set', type=argparse_bool, default=False,
+                        help="Wait until pose is set in Unreal Engine")
+    parser.add_argument('--measure-timing', type=argparse_bool, default=False, help="Measure timing of steps")
     parser.add_argument('--visualize', type=argparse_bool, default=False)
+    parser.add_argument('--compression-level', default=5, type=int, help="Gzip compression level")
+    parser.add_argument('--check-written-records', type=argparse_bool, default=True,
+                        help="Whether written files should be read and checked afterwards.")
 
     args = parser.parse_args()
 

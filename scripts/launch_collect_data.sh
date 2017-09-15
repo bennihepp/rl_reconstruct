@@ -59,6 +59,7 @@ VOXEL_OCCUPIED_THRESHOLD=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONF
 OBSERVATION_COUNT_SATURATION=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG octomap.observation_count_saturation --type float`
 SURFACE_VOXELS_FILENAME=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG octomap.surface_voxels_filename`
 BINARY_SURFACE_VOXELS_FILENAME=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG octomap.binary_surface_voxels_filename`
+NAIVE_SCAN_INSERTION=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG octomap.naive_scan_insertion --type bool`
 USE_ONLY_SURFACE_VOXELS_FOR_SCORE=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG octomap.use_only_surface_voxels_for_score --type bool`
 
 ENVIRONMENT_CLASS=`python -m pybh.tools.read_yaml_value $ENVIRONMENT_CONFIG environment_class`
@@ -102,6 +103,7 @@ tmux send-keys -t $SESSION:3 "roslaunch octomap_server_ext $LAUNCH_FILE " \
   "observation_count_saturation:=$OBSERVATION_COUNT_SATURATION " \
   "surface_voxels_filename:=\"$SURFACE_VOXELS_FILENAME\" " \
   "binary_surface_voxels_filename:=\"$BINARY_SURFACE_VOXELS_FILENAME\" " \
+  "naive_scan_insertion:=\"$NAIVE_SCAN_INSERTION\" " \
   "use_only_surface_voxels_for_score:=$USE_ONLY_SURFACE_VOXELS_FOR_SCORE" C-m
 
 tmux send-keys -t $SESSION:4 "export ROS_MASTER_URI='http://localhost:$ROSCORE_PORT/'" C-m

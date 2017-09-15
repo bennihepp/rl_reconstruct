@@ -22,10 +22,11 @@ octomap:
   voxel_free_threshold: 0.25
   voxel_occupied_threshold: 0.75
   observation_count_saturation: 3.0
+  naive_scan_insertion: false
+  use_only_surface_voxels_for_score: true
   surface_voxels_filename: ""
   binary_surface_voxels_filename:
     /home/bhepp/Documents/UnrealProjects/CustomScenes/Export/buildings/surface_voxels.bin
-  use_only_surface_voxels_for_score: true
 
 camera:
   width: 320
