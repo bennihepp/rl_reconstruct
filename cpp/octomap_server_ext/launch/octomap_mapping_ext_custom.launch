@@ -4,6 +4,7 @@
   <arg name="binary_surface_voxels_filename" default="" />
   <arg name="voxel_size" />
   <arg name="max_range" />
+  <arg name="naive_scan_insertion" />
   <arg name="use_only_surface_voxels_for_score" />
   <arg name="observation_count_saturation" />
   <arg name="voxel_occupied_threshold" />
@@ -40,6 +41,8 @@
 
     <!-- occupancy threshold above which a voxel is considered to be occupied -->
     <param name="voxel_occupied_threshold" value="$(arg voxel_occupied_threshold)" type="double" />
+
+    <param name="naive_scan_insertion" value="$(arg naive_scan_insertion)" type="bool" />
 
     <!-- whether to only consider surface voxels for score and reward -->
     <param name="use_only_surface_voxels_for_score" value="$(arg use_only_surface_voxels_for_score)" type="bool" />

@@ -75,6 +75,7 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
   m_compressMap(true),
   m_incrementalUpdate(false),
   m_initConfig(true),
+  m_naiveScanInsertion(false),
   m_useOnlySurfaceVoxelsForScore(true),
   m_score(0.0),
   m_normalized_score(0.0),
@@ -184,6 +185,7 @@ OctomapServerExt::OctomapServerExt(ros::NodeHandle private_nh_)
     ROS_INFO("Publishing non-latched (topics are only prepared as needed, will only be re-published on map change");
   }
 
+  private_nh.param("naive_scan_insertion", m_naiveScanInsertion, m_naiveScanInsertion);
   private_nh.param("use_only_surface_voxels_for_score", m_useOnlySurfaceVoxelsForScore, m_useOnlySurfaceVoxelsForScore);
   private_nh.param("binary_surface_voxels_filename", m_binarySurfaceVoxelsFilename, m_binarySurfaceVoxelsFilename);
   private_nh.param("surface_voxel_filename", m_surfaceVoxelsFilename, m_surfaceVoxelsFilename);
@@ -2115,7 +2117,7 @@ void OctomapServerExt::insertScan(OcTreeT* octree, const tf::Point& sensorOrigin
                                   octomap::OcTreeKey& updateBBXMin,
                                   octomap::OcTreeKey& updateBBXMax,
                                   const bool ignore_if_maxrange_exceeded) {
-  point3d sensorOrigin = pointTfToOctomap(sensorOriginTf);
+  const point3d sensorOrigin = pointTfToOctomap(sensorOriginTf);
 
   if (!octree->coordToKeyChecked(sensorOrigin, updateBBXMin)
       || !octree->coordToKeyChecked(sensorOrigin, updateBBXMax))
@@ -2123,22 +2125,68 @@ void OctomapServerExt::insertScan(OcTreeT* octree, const tf::Point& sensorOrigin
     ROS_ERROR_STREAM("Could not generate Key for origin "<<sensorOrigin);
   }
 
-  KeySet free_cells, occupied_cells;
-  computeScanRayKeys(
-          m_octree, sensorOriginTf, pc,
-          updateBBXMin, updateBBXMax,
-          free_cells, occupied_cells);
+  if (m_naiveScanInsertion) {
+    for (PCLPointCloud::const_iterator it = pc.begin(); it != pc.end(); ++it){
+      const point3d point(it->x, it->y, it->z);
+      const double distance = (point - sensorOrigin).norm();
+      // maxrange check
+      if (m_maxRange < 0.0 || distance <= m_maxRange) {
+        // free cells
+        if (octree->computeRayKeys(sensorOrigin, point, m_keyRay)){
+          for (auto key_it = m_keyRay.begin(); key_it != m_keyRay.end(); ++key_it) {
+            octree->updateNode(*key_it, false);
+          }
+        }
+        // occupied endpoint
+        OcTreeKey key;
+        if (octree->coordToKeyChecked(point, key)) {
+          octree->updateNode(key, true);
 
-  // mark free cells only if not seen occupied in this cloud
-  for(KeySet::iterator it = free_cells.begin(), end=free_cells.end(); it!= end; ++it){
-    if (occupied_cells.find(*it) == occupied_cells.end()){
-      octree->updateNode(*it, false);
+          updateMinKey(key, updateBBXMin);
+          updateMaxKey(key, updateBBXMax);
+        }
+      }
+      else if (!ignore_if_maxrange_exceeded) {
+        // ray longer than maxrange:;
+        const point3d new_end = sensorOrigin + (point - sensorOrigin).normalized() * m_maxRange;
+        if (octree->computeRayKeys(sensorOrigin, new_end, m_keyRay)){
+          for (auto key_it = m_keyRay.begin(); key_it != m_keyRay.end(); ++key_it) {
+            octree->updateNode(*key_it, false);
+          }
+
+          // We should only use the voxel at the truncated end point if we are certain that the ray ended further away.
+          if (m_maxRange - distance >= octree->getResolution()) {
+            octomap::OcTreeKey endKey;
+            if (octree->coordToKeyChecked(new_end, endKey)) {
+              octree->updateNode(endKey, false);
+              updateMinKey(endKey, updateBBXMin);
+              updateMaxKey(endKey, updateBBXMax);
+            } else {
+              ROS_ERROR_STREAM("Could not generate Key for endpoint " << new_end);
+            }
+          }
+        }
+      }
     }
   }
+  else {
+    KeySet free_cells, occupied_cells;
+    computeScanRayKeys(
+            m_octree, sensorOriginTf, pc,
+            updateBBXMin, updateBBXMax,
+            free_cells, occupied_cells);
 
-  // now mark all occupied cells:
-  for (KeySet::iterator it = occupied_cells.begin(), end=occupied_cells.end(); it!= end; it++) {
-    octree->updateNode(*it, true);
+    // mark free cells only if not seen occupied in this cloud
+    for (KeySet::iterator it = free_cells.begin(), end = free_cells.end(); it != end; ++it) {
+      if (occupied_cells.find(*it) == occupied_cells.end()) {
+        octree->updateNode(*it, false);
+      }
+    }
+
+    // now mark all occupied cells:
+    for (KeySet::iterator it = occupied_cells.begin(), end = occupied_cells.end(); it != end; it++) {
+      octree->updateNode(*it, true);
+    }
   }
 
   // TODO: eval lazy+updateInner vs. proper insertion
@@ -2265,49 +2313,7 @@ void OctomapServerExt::insertScan(OcTreeT* octree, const tf::Point& sensorOrigin
     }
   }
 
-  computeScanRayKeys(
-          m_octree, sensorOriginTf, nonground,
-          updateBBXMin, updateBBXMax,
-          free_cells, occupied_cells);
-
-  // mark free cells only if not seen occupied in this cloud
-  for(KeySet::iterator it = free_cells.begin(), end=free_cells.end(); it!= end; ++it){
-    if (occupied_cells.find(*it) == occupied_cells.end()){
-      octree->updateNode(*it, false);
-    }
-  }
-
-  // now mark all occupied cells:
-  for (KeySet::iterator it = occupied_cells.begin(), end=occupied_cells.end(); it!= end; it++) {
-    octree->updateNode(*it, true);
-  }
-
-  // TODO: eval lazy+updateInner vs. proper insertion
-  // non-lazy by default (updateInnerOccupancy() too slow for large maps)
-  //octree->updateInnerOccupancy();
-  octomap::point3d minPt, maxPt;
-  ROS_DEBUG_STREAM("Bounding box keys (before): " << updateBBXMin[0] << " " <<updateBBXMin[1] << " " << updateBBXMin[2] << " / " <<updateBBXMax[0] << " "<<updateBBXMax[1] << " "<< updateBBXMax[2]);
-
-  // TODO: snap max / min keys to larger voxels by m_maxTreeDepth
-//   if (m_maxTreeDepth < 16)
-//   {
-//      OcTreeKey tmpMin = getIndexKey(updateBBXMin, m_maxTreeDepth); // this should give us the first key at depth m_maxTreeDepth that is smaller or equal to updateBBXMin (i.e. lower left in 2D grid coordinates)
-//      OcTreeKey tmpMax = getIndexKey(updateBBXMax, m_maxTreeDepth); // see above, now add something to find upper right
-//      tmpMax[0]+= octree->getNodeSize( m_maxTreeDepth ) - 1;
-//      tmpMax[1]+= octree->getNodeSize( m_maxTreeDepth ) - 1;
-//      tmpMax[2]+= octree->getNodeSize( m_maxTreeDepth ) - 1;
-//      updateBBXMin = tmpMin;
-//      updateBBXMax = tmpMax;
-//   }
-
-  // TODO: we could also limit the bbx to be within the map bounds here (see publishing check)
-  minPt = octree->keyToCoord(updateBBXMin);
-  maxPt = octree->keyToCoord(updateBBXMax);
-  ROS_DEBUG_STREAM("Updated area bounding box: "<< minPt << " - "<<maxPt);
-  ROS_DEBUG_STREAM("Bounding box keys (after): " << updateBBXMin[0] << " " <<updateBBXMin[1] << " " << updateBBXMin[2] << " / " <<updateBBXMax[0] << " "<<updateBBXMax[1] << " "<< updateBBXMax[2]);
-
-  if (m_compressMap)
-    octree->prune();
+  insertScan(m_octree, sensorOriginTf, nonground, updateBBXMin, updateBBXMax);
 
 #ifdef COLOR_OCTOMAP_SERVER
   if (colors)
@@ -2607,6 +2613,7 @@ bool OctomapServerExt::infoSrv(Info::Request &req, Info::Response &res) {
   res.max_range = m_maxRange;
   res.num_nodes = m_octree->size();
   res.num_leaf_nodes = m_octree->getNumLeafNodes();
+  res.naive_scan_insertion = m_naiveScanInsertion;
   res.use_only_surface_voxels_for_score = m_useOnlySurfaceVoxelsForScore;
   res.surface_voxels_filename = m_surfaceVoxelsFilename;
   res.binary_surface_voxels_filename = m_binarySurfaceVoxelsFilename;
