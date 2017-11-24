@@ -1,0 +1,63 @@
+<?xml version="1.0"?>
+
+<launch>
+
+  <arg name="voxel_size" />
+  <arg name="max_range" />
+  <arg name="occlusion_update_dist" />
+  <arg name="image_width" />
+  <arg name="image_height" />
+  <arg name="focal_length_x" />
+  <arg name="focal_length_y" />
+  <arg name="principal_point_x" />
+  <arg name="principal_point_y" />
+  <arg name="voxels_in_void_ray" />
+
+  <node pkg="ig_active_reconstruction_octomap" type="octomap_world_representation" name="octomap_world_representation" clear_params="true" output="screen">
+    
+    <!--Octree configuration-->
+    <param name="resolution_m" value="$(arg voxel_size)" />
+    <param name="occupancy_threshold" value="0.5" />
+    <param name="hit_probability" value="0.7" />
+    <param name="miss_probability" value="0.4" />
+    <param name="clamping_threshold_min" value="0.12" />
+    <param name="clamping_threshold_max" value="0.97" />
+    
+    <!-- PCL input configuration -->
+    <param name="world_frame_name" value="map" />
+    <param name="use_bounding_box" value="false" />
+    <param name="bounding_box_min_point_m/x" value="-100" />
+    <param name="bounding_box_min_point_m/y" value="-100" />
+    <param name="bounding_box_min_point_m/z" value="-100" />
+    <param name="bounding_box_max_point_m/x" value="100" />
+    <param name="bounding_box_max_point_m/y" value="100" />
+    <param name="bounding_box_max_point_m/z" value="100" />
+    <param name="max_sensor_range_m" value="$(arg max_range)" />
+    
+    <!-- Occlusion calculation configuration -->
+    <param name="occlusion_update_dist_m" value="$(arg occlusion_update_dist)" />
+    
+    <!-- Raycaster configuration -->
+    <param name="img_width_px" value="$(arg image_width)" />
+    <param name="img_height_px" value="$(arg image_height)" />
+    <param name="camera/fx" value="$(arg focal_length_x)" />
+    <param name="camera/fy" value="$(arg focal_length_y)" />
+    <param name="camera/cx" value="$(arg principal_point_x)" />
+    <param name="camera/cy" value="$(arg principal_point_y)" />
+    <param name="max_ray_depth_m" value="$(arg max_range)" />
+    
+    <param name="raycasting/resolution_x" value="1" />
+    <param name="raycasting/resolution_y" value="1" />
+    <param name="raycasting/min_x_perc" value="0" />
+    <param name="raycasting/min_y_perc" value="0" />
+    <param name="raycasting/max_x_perc" value="1" />
+    <param name="raycasting/max_y_perc" value="1" />
+    
+    <!-- Information gain config -->
+    <param name="ig/p_unknown_prior" value="0.5" />
+    <param name="ig/p_unknown_upper_bound" value="0.8" />
+    <param name="ig/p_unknown_lower_bound" value="0.2" />
+    <param name="ig/voxels_in_void_ray" value="$(arg voxels_in_void_ray)" />
+    
+  </node>
+</launch>

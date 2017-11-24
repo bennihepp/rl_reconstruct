@@ -1,0 +1,4 @@
+std_msgs/Empty request
+---
+string[] names
+uint32[] ids
