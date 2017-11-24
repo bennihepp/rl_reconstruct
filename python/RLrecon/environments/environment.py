@@ -1,8 +1,6 @@
 from __future__ import print_function
 import numpy as np
-from RLrecon import math_utils
-from RLrecon.math_utils import convert_rpy_to_quat
-from RLrecon.utils import Timer
+from pybh import math_utils, utils
 
 
 TERMINAL_SCORE_THRESHOLD = 0.75
@@ -66,17 +64,22 @@ class BaseEnvironment(object):
                  action_rewards=None,
                  engine=None,
                  mapper=None,
-                 clear_size=6.0,
+                 clear_extent=6.0,
                  action_not_allowed_reward=DEFAULT_ACTION_NOT_ALLOWED_REWARD,
                  action_not_valid_reward=DEFAULT_ACTION_NOT_VALID_REWARD,
                  terminal_score_threshold=TERMINAL_SCORE_THRESHOLD,
                  filter_depth_map=False,
-                 use_ros=True,
-                 ros_pose_topic='agent_pose',
-                 ros_world_frame='map',
+                 start_bounding_box=None,
                  score_bounding_box=None,
                  collision_obs_level=1,
-                 collision_obs_sizes=None):
+                 collision_obs_sizes=None,
+                 collision_bbox=None,
+                 collision_bbox_obs_level=0,
+                 collision_occupancy_threshold=0.3,
+                 collision_observation_certainty_threshold=0.1,
+                 collision_check_above_camera=False,
+                 collision_check_above_camera_distance=10,
+                 prng_or_seed=None):
         """Initialize base environment.
 
         Args:
@@ -86,13 +89,25 @@ class BaseEnvironment(object):
             action_rewards (list): Instantanious contributions to the reward for each action.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper (:obj:): Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
+        if isinstance(prng_or_seed, np.random.RandomState):
+            self._prng = prng_or_seed
+        else:
+            self._prng = np.random.RandomState(prng_or_seed)
 
+        self._collision_occupancy_threshold = collision_occupancy_threshold
+        self._collision_observation_certainty_threshold = collision_observation_certainty_threshold
+        # TODO: Kind of hacky. Prevents reset position inside of buildings or structures.
+        self._collision_check_above_camera = collision_check_above_camera
+        self._collision_check_above_camera_distance = collision_check_above_camera_distance
+
+        self._before_reset_hooks = utils.Callbacks(return_first_value=True)
+        self._after_reset_hooks = utils.Callbacks()
+        self._update_pose_hooks = utils.Callbacks()
+
+        self._observation_count_saturation = 3.0
         self._minimum_pitch = 0.
         self._maximum_pitch = np.pi / 2.
         self._prev_score = 0.0
@@ -104,8 +119,12 @@ class BaseEnvironment(object):
         if mapper is None:
             from RLrecon.mapping.octomap_ext_mapper import OctomapExtMapper
             mapper = OctomapExtMapper()
+        mapper.perform_reset(reset_stack=True, reset_storage=True)
         self._mapper = mapper
-        self._clear_size = clear_size
+        clear_extent = np.array(clear_extent)
+        if len(clear_extent) == 1:
+            clear_extent = np.array([clear_extent, clear_extent, clear_extent])
+        self._clear_extent = clear_extent
         self._action_list = action_list
         if update_map_flags is None:
             update_map_flags = [True] * len(action_list)
@@ -117,27 +136,49 @@ class BaseEnvironment(object):
         self._action_not_valid_reward = action_not_valid_reward
         self._terminal_score_threshold = terminal_score_threshold
         self._filter_depth_map = filter_depth_map
-        if use_ros:
-            import rospy
-            from geometry_msgs.msg import PoseStamped
-            self._use_ros = True
-            self._ros_world_frame = ros_world_frame
-            self._pose_pub = rospy.Publisher(ros_pose_topic, PoseStamped, queue_size=10)
-        else:
-            self._use_ros = False
         self._score_bounding_box = score_bounding_box
+        if self._score_bounding_box is None:
+            self._score_bounding_box = self._world_bounding_box
+        self._start_bounding_box = start_bounding_box
+        if self._start_bounding_box is None:
+            self._start_bounding_box = self._world_bounding_box
+        assert self._world_bounding_box.contains(self._start_bounding_box), \
+            "Start bounding box must be fully inside of world bounding box"
         self._collision_obs_level = collision_obs_level
         if collision_obs_sizes is None:
             collision_obs_sizes = [3, 3, 3]
         self._collision_obs_sizes = collision_obs_sizes
+        if collision_bbox is None:
+            map_resolution = self.get_mapper().perform_info().map_resolution
+            collision_bbox_extent = np.array([3 * map_resolution] * 3)
+            collision_bbox = math_utils.BoundingBox(-0.5 * collision_bbox_extent, +0.5 * collision_bbox_extent)
+        self._collision_bbox = collision_bbox
+        self._collision_bbox_obs_level = collision_bbox_obs_level
 
-    def _update_pose(self, new_pose, wait_until_set=False):
+    def set_prng(self, prng):
+        """Overwrite pseudo-random number generator. This is useful for evaulation purposes."""
+        self._prng = prng
+
+    @property
+    def before_reset_hooks(self):
+        return self._before_reset_hooks
+
+    @property
+    def after_reset_hooks(self):
+        return self._after_reset_hooks
+
+    @property
+    def update_pose_hooks(self):
+        return self._update_pose_hooks
+
+    def _update_pose(self, new_pose, wait_until_set=False, broadcast=True):
         """Update pose and publish with ROS"""
         # self._engine.set_location(new_pose.location())
         # roll, pitch, yaw = new_pose.orientation_rpy()
         # self._engine.set_orientation_rpy(roll, pitch, yaw)
         self._engine.set_pose_rpy((new_pose.location(), new_pose.orientation_rpy()), wait_until_set)
-        self._publish_pose(new_pose)
+        if broadcast:
+            self._update_pose_hooks(new_pose)
 
     def _get_depth_point_cloud(self, pose):
         """Retrieve depth image point cloud in agent frame from simulation engine"""
@@ -159,7 +200,7 @@ class BaseEnvironment(object):
         # result = self._mapper.perform_insert_point_cloud_rpy(pose.location(), pose.orientation_rpy(), point_cloud)
         # # t2 = timer.elapsed_seconds()
 
-        self._engine.set_pose(pose, wait_until_set=True)
+        self._engine.set_pose_rpy(pose, wait_until_set=True)
         intrinsics = np.zeros((3, 3))
         intrinsics[0, 0] = self.get_focal_length()
         intrinsics[1, 1] = intrinsics[0, 0]
@@ -176,20 +217,6 @@ class BaseEnvironment(object):
         # print("  ", t2 - t1)
         # print("Total: ", t2)
         return result.reward, result.normalized_score
-
-    def _publish_pose(self, pose):
-        """Publish pose if ROS is enabled"""
-        if self._use_ros:
-            import rospy
-            from geometry_msgs.msg import PoseStamped
-            from RLrecon import ros_utils
-            pose_msg = PoseStamped()
-            pose_msg.header.frame_id = self._ros_world_frame
-            pose_msg.header.stamp = rospy.Time.now()
-            pose_msg.pose.position = ros_utils.point_numpy_to_ros(pose.location())
-            orientation_quat = math_utils.convert_rpy_to_quat(pose.orientation_rpy())
-            pose_msg.pose.orientation = ros_utils.quaternion_numpy_to_ros(orientation_quat)
-            self._pose_pub.publish(pose_msg)
 
     def _get_observation(self, pose):
         """Return current observation of agent"""
@@ -209,16 +236,22 @@ class BaseEnvironment(object):
         """Get score bounding box"""
         return self._score_bounding_box
 
+    def get_start_bounding_box(self):
+        """Get start bounding box"""
+        return self._start_bounding_box
+
+    def get_collision_bounding_box(self):
+        """Get collision bounding box"""
+        return self._collision_bbox
+
     def get_action_not_allowed_reward(self):
         """Return reward for invalid action"""
         return self._action_not_allowed_reward
 
     def get_pose(self):
         """Get current pose from simulation engine"""
-        location = self._engine.get_location()
-        orientation_rpy = self._engine.get_orientation_rpy()
+        location, orientation_rpy = self._engine.get_pose_rpy()
         pose = self.Pose(location, orientation_rpy)
-        self._publish_pose(pose)
         return pose
 
     def get_location(self):
@@ -236,67 +269,76 @@ class BaseEnvironment(object):
         orientation_quat = self._engine.get_orientation_quat()
         return orientation_quat
 
-    def set_pose(self, pose, wait_until_set=False):
+    def set_pose(self, pose, wait_until_set=False, broadcast=True):
         """Set new pose"""
-        self._update_pose(pose, wait_until_set)
+        self._update_pose(pose, wait_until_set, broadcast)
 
     def simulate_action_on_pose(self, pose, action_index):
         """Check if an action is allowed (i.e. no collision, inside bounding box)"""
+        if action_index == -1:
+            # NOP action
+            return pose
         valid, new_pose = self._action_list[action_index](pose)
         return new_pose
 
-    def is_action_colliding(self, pose, action_index, verbose=False):
+    def is_pose_colliding(self, pose, verbose=False):
         location = pose.location()
-        new_pose = self.simulate_action_on_pose(pose, action_index)
-        new_location = new_pose.location()
-        if np.any(new_location < self._world_bounding_box.minimum()):
+        if np.any(location < self._world_bounding_box.minimum()):
             if verbose:
                 print("World bbox collision")
             return True
-        if np.any(new_location > self._world_bounding_box.maximum()):
+        if np.any(location > self._world_bounding_box.maximum()):
             if verbose:
                 print("World bbox collision")
             return True
-        if np.allclose(location, new_location):
-            # Pure rotations are always allowed
-            if verbose:
-                print("Pure rotation -> no collision")
-            return False
 
-        res = self.get_mapper().perform_query_subvolume_rpy(
-            new_location, new_pose.orientation_rpy(),
-            self._collision_obs_level,
-            self._collision_obs_sizes[0], self._collision_obs_sizes[1], self._collision_obs_sizes[2],
-            axis_mode=0)
-        occupancies = np.asarray(res.occupancies)
-        observation_certainties = np.asarray(res.observation_certainties)
-        if np.any(occupancies > 0.3):
-            if verbose:
-                print("Collision because of occupancies")
-            return True
-        if np.any(observation_certainties < 0.3):
-            if verbose:
-                print("Collision because of observation certainties")
-            return True
+        # TODO: Decide which variant to use and remove the other one
+        # if np.all(location >= self._score_bounding_box.minimum()) \
+        #         and np.all(location <= self._score_bounding_box.maximum()):
+        if True:
+            bbox = self._collision_bbox.move(location)
+            res = self.get_mapper().perform_query_bbox(bbox, self._collision_bbox_obs_level, dense=True)
+            # res = self.get_mapper().perform_query_subvolume_rpy(
+            #     location, pose.orientation_rpy(),
+            #     self._collision_obs_level,s
+            #     self._collision_obs_sizes[0], self._collision_obs_sizes[1], self._collision_obs_sizes[2],
+            #     axis_mode=0)
+            if len(res.occupancies) > 0:
+                occupancies = np.asarray(res.occupancies)
+                observation_certainties = np.asarray(res.observation_certainties)
+                if np.any(occupancies > self._collision_occupancy_threshold):
+                    if verbose:
+                        print("Collision because of occupancies")
+                        print(occupancies)
+                    return True
+                if np.any(observation_certainties < self._collision_observation_certainty_threshold):
+                    if verbose:
+                        print("Collision because of observation certainties")
+                    return True
 
-        direction = new_location - location
-        ray = self._mapper.Ray(location, direction)
+        # No collision
+        return False
+
+    def is_ray_colliding(self, ray_origin, ray_target=None, ignore_unknown_voxels=False, verbose=False):
+        if ray_target is None:
+            assert isinstance(ray_origin, self._mapper.Ray)
+            ray = ray_origin
+        else:
+            ray = self._mapper.Ray(ray_origin, ray_target - ray_origin)
         rays = [ray]
-        # TODO: Figure out what to do for collision safety. Here we just shoot a single ray.
-        ignore_unknown_voxels = False
         max_range = -1
         rr = self._mapper.perform_raycast(rays, ignore_unknown_voxels=ignore_unknown_voxels,
-                                          max_range=max_range, only_in_score_bounding_box=True)
+                                          max_range=max_range, only_in_score_bounding_box=False)
         point_cloud = self._mapper.convert_raycast_point_cloud_from_msg(rr.point_cloud)
-        hit_distance = np.linalg.norm(point_cloud[0].xyz - location)
-        move_distance = np.linalg.norm(new_location - location)
-        assert(rr.num_hits_occupied + rr.num_hits_unknown <= 1)
-        if hit_distance <= move_distance:
+        hit_distance = np.linalg.norm(point_cloud[0].xyz - ray_origin)
+        target_distance = np.linalg.norm(ray_target - ray_origin)
+        assert rr.num_hits_occupied + rr.num_hits_unknown <= 1
+        if hit_distance <= target_distance:
             if verbose:
                 print("Collision because of raycast")
                 print("hit_distance:", hit_distance)
-                print("move_distance:", move_distance)
-                print("location:", pose.location())
+                print("target_distance:", target_distance)
+                print("ray_origin:", ray_origin)
                 print("xyz:", point_cloud[0].xyz)
                 print("occupancy:", point_cloud[0].occupancy)
                 print("observation_certainty:", point_cloud[0].observation_certainty)
@@ -306,11 +348,31 @@ class BaseEnvironment(object):
         else:
             return False
 
+    def is_action_colliding(self, pose, action_index, ignore_unknown_voxels=False, verbose=False):
+        location = pose.location()
+        new_pose = self.simulate_action_on_pose(pose, action_index)
+        new_location = new_pose.location()
+
+        if np.allclose(location, new_location):
+            # Pure rotations are always allowed.
+            # If you start from a colliding position this will still pass.
+            # if verbose:
+            #     print("Pure rotation -> no collision")
+            return False
+
+        if self.is_pose_colliding(new_pose, verbose=verbose):
+            return True
+
+        # TODO: Figure out what to do for collision safety. Here we just shoot a single ray.
+        if self.is_ray_colliding(location, new_location, ignore_unknown_voxels=ignore_unknown_voxels, verbose=verbose):
+            return True
+        else:
+            return False
+
     def is_action_allowed_on_pose(self, pose, action_index):
         return self.is_action_colliding(pose, action_index)
 
-    def reset(self, pose=None, reset_map=True, keep_pose=False):
-        """Initialize environment (basically clears a bounding box in the occupancy map)"""
+    def _reset(self, pose=None, reset_map=True, keep_pose=False):
         self._prev_score = 0.0
         if keep_pose or pose is None:
             pose = self.get_pose()
@@ -318,28 +380,26 @@ class BaseEnvironment(object):
             self._update_pose(pose)
         if reset_map:
             self._mapper.perform_reset()
-        bbox = math_utils.BoundingBox(
-            np.array([-np.inf, -np.inf, -np.inf]),
-            np.array([np.inf, np.inf, np.inf]))
-        # bbox = math_utils.BoundingBox(
-        #     np.array([-25, -25, -25]),
-        #     np.array([+25, +25, +25]))
-        if reset_map:
-            # TODO: Currently clearing the whole map... Should only be free space
-            self._mapper.perform_clear_bounding_box_voxels(bbox, densify=False)
-            # self._mapper.perform_clear_bounding_box_voxels(bbox, densify=True)
-            if self._score_bounding_box is not None:
-                self._mapper.perform_override_bounding_box_voxels(self._score_bounding_box, 0.5, 0.0)
-            if self._clear_size > 0:
+            if np.any(self._clear_extent > 0):
                 clear_bbox = math_utils.BoundingBox(
-                    pose.location() - self._clear_size / 2.0,
-                    pose.location() + self._clear_size / 2.0)
-                self._mapper.perform_clear_bounding_box_voxels(clear_bbox)
+                    - self._clear_extent / 2.0,
+                    + self._clear_extent / 2.0).move(pose.location())
+                clear_occupancy = 0.0
+                clear_observation_count = self._observation_count_saturation
+                self._mapper.perform_override_bounding_box_voxels(
+                    clear_bbox, clear_occupancy, clear_observation_count, densify=False)
             # Only for debugging and visualization (RViz has problems showing free voxels)
-            # self._mapper.perform_override_bounding_box_voxels(clear_bbox, 0.8, 0.0)
+            # self._mapper.perform_override_bounding_box_voxels(clear_bbox, 0.8, self._observation_count_saturation)
         if self._score_bounding_box is not None:
             self._mapper.perform_set_score_bounding_box(self._score_bounding_box)
         observation = self._get_observation(pose)
+        return observation
+
+    def reset(self, pose=None, reset_map=True, keep_pose=False):
+        """Initialize environment (basically clears a bounding box in the occupancy map)"""
+        self._before_reset_hooks()
+        observation = self._reset(pose, reset_map, keep_pose)
+        self._after_reset_hooks()
         return observation
 
     def get_num_of_actions(self):
@@ -458,9 +518,6 @@ class Environment(BaseEnvironment):
             yaw_amount (float): Scale of yaw rotations.
             pitch_amount (float): Scale of pitch rotations.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -547,15 +604,15 @@ class Environment(BaseEnvironment):
         roll = 0
         pitch = 0
         if self._random_reset:
-            yaw = 2 * np.pi * np.random.rand()
+            yaw = 2 * np.pi * self._prng.rand()
         else:
             yaw = 0
         valid_location = False
-        center_location = 0.5 * (self.get_world_bounding_box().maximum() + self.get_world_bounding_box().minimum())
-        location_range = 2 * (self.get_world_bounding_box().maximum() - self.get_world_bounding_box().minimum())
+        center_location = 0.5 * (self.get_start_bounding_box().maximum() + self.get_start_bounding_box().minimum())
+        location_range = 2 * (self.get_start_bounding_box().maximum() - self.get_start_bounding_box().minimum())
         min_location = center_location - 0.5 * location_range
         while not valid_location:
-            location = min_location + np.random.rand(3) * location_range
+            location = min_location + self._prng.rand(3) * location_range
             valid_location = np.linalg.norm(location) >= 8 and location[2] >= 4
         orientation_rpy = np.array([roll, pitch, yaw])
         pose = self.Pose(location, orientation_rpy)
@@ -573,6 +630,7 @@ class HorizontalEnvironment(Environment):
                  random_reset=True,
                  move_distance=2.0,
                  yaw_amount=math_utils.degrees_to_radians(180. / 10.),
+                 yaw_amount_degrees=None,
                  # pitch_amount=math_utils.degrees_to_radians(180. / 5.),
                  **kwargs):
         """Initialize environment.
@@ -581,18 +639,24 @@ class HorizontalEnvironment(Environment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            move_distance (float): Scale of local motions.
+            move_distance (float or np.ndarray((3,)): Scale of local motions (along each axis).
+            y_move_distance (float): Scale of local motions in y axis.
+            z_move_distance (float): Scale of local motions in z axis.
             yaw_amount (float): Scale of yaw rotations.
+            yaw_amount_degrees (float: Scale of yaw rotation in degrees. Overwrites yaw_amount if not `None`.
             pitch_amount (float): Scale of pitch rotations.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
+        move_distance = np.array(move_distance)
+        if move_distance.ndim == 0:
+            move_distance = np.array([move_distance, move_distance, move_distance])
+        assert(len(move_distance) == 3)
         self._move_distance = move_distance
         self._yaw_amount = yaw_amount
+        if yaw_amount_degrees is not None:
+            self._yaw_amount = math_utils.degrees_to_radians(yaw_amount_degrees)
         # self._pitch_amount = pitch_amount
         action_list = [
             # self.nop,
@@ -613,6 +677,254 @@ class HorizontalEnvironment(Environment):
             True,
             # True,
             # True,
+            False,
+            False,
+            False,
+            False,
+            False,
+            # False,
+            # False,
+        ]
+        action_penalty = DEFAULT_ACTION_PENALTY
+        action_rewards = np.array([action_penalty] * len(action_list))
+        super(Environment, self).__init__(
+            world_bounding_box,
+            action_list,
+            update_map_flags=update_map_flags,
+            action_rewards=action_rewards,
+            **kwargs)
+
+    def _get_origin_angle(self, location):
+        theta = np.arctan2(location[1], location[0])
+        return theta
+
+    def move_left(self, pose):
+        """Perform local move left"""
+        return self._move_local_without_pr(pose, np.array([0, +self._move_distance[1], 0]))
+
+    def move_right(self, pose):
+        """Perform local move right"""
+        return self._move_local_without_pr(pose, np.array([0, -self._move_distance[1], 0]))
+
+    def move_down(self, pose):
+        """Perform local move down"""
+        return self._move_local_without_pr(pose, np.array([0, 0, -self._move_distance[2]]))
+
+    def move_up(self, pose):
+        """Perform local move up"""
+        return self._move_local_without_pr(pose, np.array([0, 0, +self._move_distance[2]]))
+
+    def move_backward(self, pose):
+        """Perform local move backward"""
+        return self._move_local_without_pr(pose, np.array([-self._move_distance[0], 0, 0]))
+
+    def move_forward(self, pose):
+        """Perform local move forward"""
+        return self._move_local_without_pr(pose, np.array([+self._move_distance[0], 0, 0]))
+
+    def yaw_clockwise(self, pose):
+        """Perform yaw rotation clockwise"""
+        return self._rotate(pose, 0, 0, -self._yaw_amount)
+
+    def yaw_counter_clockwise(self, pose):
+        """Perform yaw rotation counter-clockwise"""
+        return self._rotate(pose, 0, 0, +self._yaw_amount)
+
+    def yaw_turn_around(self, pose):
+        """Perform yaw rotation around 180 degrees"""
+        return self._rotate(pose, 0, 0, np.pi)
+
+    #TODO: Fix random placement
+    def reset(self, ignore_collision=False, pose=None, **kwargs):
+        """Resets the environment."""
+        override_pose = self._before_reset_hooks()
+        if override_pose is not None:
+            pose = override_pose
+        if pose is not None:
+            reset_result = super(Environment, self)._reset(pose, **kwargs)
+            # Check if all actions are still possible after reset
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    print("WARNING: Sampled location collides after map reset. Adjust the clearing bbox")
+                for action_index in range(self.get_num_of_actions()):
+                    if self.is_action_colliding(pose, action_index, verbose=True):
+                        print("WARNING: Sampled location collides for action {} after map reset. "
+                              "Adjust the clearing bbox".format(action_index))
+                        break
+            self._after_reset_hooks()
+            return reset_result
+        roll = 0
+        pitch = 0
+        if self._random_reset:
+            # yaw = 2 * np.pi * self._prng.rand()
+            u = self._prng.rand()
+            yaw = 2 * np.pi * u
+        else:
+            yaw = 0
+        orientation_rpy = np.array([roll, pitch, yaw])
+        center_location = 0.5 * (self.get_start_bounding_box().maximum() + self.get_start_bounding_box().minimum())
+        location_range = self.get_start_bounding_box().maximum() - self.get_start_bounding_box().minimum()
+        min_location = center_location - 0.5 * location_range
+        valid_location = False
+        reset_necessary = True
+        while not valid_location:
+            if reset_necessary:
+                cleared_world_bbox_with_surface_voxels_key = "cleared_world_bbox_with_surface_voxels"
+                if self.get_mapper().does_octomap_exist(cleared_world_bbox_with_surface_voxels_key):
+                    print("Loading cleared octomap with surface voxels")
+                    self.get_mapper().restore_octomap(cleared_world_bbox_with_surface_voxels_key)
+                    reset_necessary = False
+                else:
+                    print("Map reset")
+                    self.get_mapper().perform_reset()
+                    clear_occupancy = 0.0
+                    clear_observation_count = np.finfo(np.float32).max
+                    clear_world_bbox = self.get_world_bounding_box().scale(2)
+                    print("Override world bbox voxels")
+                    self.get_mapper().perform_override_bounding_box_voxels(
+                        clear_world_bbox, clear_occupancy, clear_observation_count, densify=False)
+                    print("Load surface voxels")
+                    self.get_mapper().perform_load_surface_voxels()
+                    print("Storing octomap at key {}".format(cleared_world_bbox_with_surface_voxels_key))
+                    self.get_mapper().store_octomap(cleared_world_bbox_with_surface_voxels_key)
+                    print("Done")
+                    reset_necessary = False
+
+            location = min_location + self._prng.rand(3) * location_range
+            assert(self.get_world_bounding_box().contains(location))
+            pose = self.Pose(location, orientation_rpy)
+            # Update pose so it is visible in Rviz
+            self._update_pose(pose)
+
+            if np.any(self._clear_extent > 0):
+                clear_bbox = math_utils.BoundingBox(- self._clear_extent / 2.,
+                                                    + self._clear_extent / 2.).move(location)
+            else:
+                clear_bbox = math_utils.BoundingBox.max_extent()
+
+            valid_location = True
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    valid_location = False
+                    # print("Sampled location with collision: {}".format(location))
+                else:
+                    for action_index in range(self.get_num_of_actions()):
+                        pose_after_action = self.simulate_action_on_pose(pose, action_index)
+                        if not clear_bbox.contains(pose_after_action.location()):
+                            valid_location = False
+                            # print("Action {} is colliding".format(action_index))
+                            break
+                        camera_bbox = self._collision_bbox.move(pose_after_action.location())
+                        if not clear_bbox.contains(camera_bbox):
+                            valid_location = False
+                            # print("Camera bbox is not contained in clear bbox after action {}".format(action_index))
+                            break
+                        if self.is_action_colliding(pose, action_index):
+                            # print("Action {} is colliding".format(action_index))
+                            valid_location = False
+                            break
+                if valid_location and self._collision_check_above_camera:
+                    if self.is_ray_colliding(pose.location(), pose.location() + np.array([0, 0, self._collision_check_above_camera_distance])):
+                        # print("Sampled location with collision above")
+                        valid_location = False
+            if not valid_location:
+                continue
+            if valid_location:
+                # Sanity check
+                if np.any(self._clear_extent > 0):
+                    res = self.get_mapper().perform_query_bbox(clear_bbox, 0)
+                    occupancies = np.asarray(res.occupancies)
+                    observation_certainties = np.asarray(res.observation_certainties)
+                    if np.any(occupancies > self._collision_occupancy_threshold):
+                        # print("WARNING: Invalid start location because of occupancies in clear bbox")
+                        # print(occupancies)
+                        valid_location = False
+                    if np.any(observation_certainties < self._collision_observation_certainty_threshold):
+                        # print("WARNING: Invalid start location because of observation certainties in clear bbox")
+                        # print(observation_certainties)
+                        valid_location = False
+            if not valid_location:
+                continue
+
+            reset_necessary = True
+            reset_result = super(Environment, self)._reset(pose, **kwargs)
+            # Check if all actions are still possible after reset
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    valid_location = False
+                    print("WARNING: Sampled location collides after map reset. Adjust the clearing bbox")
+                for action_index in range(self.get_num_of_actions()):
+                    if self.is_action_colliding(pose, action_index, verbose=True):
+                        valid_location = False
+                        print("WARNING: Sampled location collides for action {} after map reset. "
+                              "Adjust the clearing bbox".format(action_index))
+                        break
+        self._after_reset_hooks()
+        return reset_result
+
+        # theta = self._get_origin_angle(location)
+        # roll = 0
+        # pitch = 0
+        # if self._random_reset:
+        #     # yaw = 2 * np.pi * self._prng.rand()
+        #     u = 2 * (self._prng.rand() - 0.5)
+        #     yaw = theta + np.pi + u * np.pi / 8.
+        # else:
+        #     yaw = 0
+        # orientation_rpy = np.array([roll, pitch, yaw])
+        # pose = self.Pose(location, orientation_rpy)
+
+    # # TODO: Make proper collision detection
+    def is_action_allowed_on_pose(self, pose, action_index):
+        return True
+
+
+class EnvironmentNoPitch(Environment):
+
+    def __init__(self,
+                 world_bounding_box,
+                 random_reset=True,
+                 move_distance=2.0,
+                 yaw_amount=math_utils.degrees_to_radians(180. / 10.),
+                 yaw_amount_degrees=None,
+                 **kwargs):
+        """Initialize environment.
+
+        Args:
+            world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
+            engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
+            mapper: Occupancy mapper (i.e. OctomapExt interface).
+            move_distance (float): Scale of local motions.
+            yaw_amount (float): Scale of yaw rotations.
+            yaw_amount_degrees (float: Scale of yaw rotation in degrees. Overwrites yaw_amount if not `None`.
+            action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
+        """
+
+        self._random_reset = random_reset
+        self._move_distance = move_distance
+        self._yaw_amount = yaw_amount
+        if yaw_amount_degrees is not None:
+            self._yaw_amount = math_utils.degrees_to_radians(yaw_amount_degrees)
+        # self._pitch_amount = pitch_amount
+        action_list = [
+            # self.nop,
+            self.move_left,
+            self.move_right,
+            self.move_down,
+            self.move_up,
+            self.move_backward,
+            self.move_forward,
+            self.yaw_clockwise,
+            self.yaw_counter_clockwise,
+            self.yaw_turn_around,
+            # self.pitch_up,
+            # self.pitch_down,
+        ]
+        update_map_flags = [
+            True,
+            True,
+            True,
+            True,
             False,
             False,
             False,
@@ -671,37 +983,132 @@ class HorizontalEnvironment(Environment):
         return self._rotate(pose, 0, 0, np.pi)
 
     #TODO: Fix random placement
-    def reset(self, **kwargs):
+    def reset(self, ignore_collision=False, pose=None, **kwargs):
         """Resets the environment."""
-        valid_location = False
-        center_location = 0.5 * (self.get_world_bounding_box().maximum() + self.get_world_bounding_box().minimum())
-        location_range = self.get_world_bounding_box().maximum() - self.get_world_bounding_box().minimum()
-        min_location = center_location - 0.5 * location_range
-        while not valid_location:
-            location = min_location + np.random.rand(3) * location_range
-            location[2] = 3.1
-            # valid_location = np.linalg.norm(location) >= 8
-            valid_location = not self.get_score_bounding_box().contains(location)
-            if not valid_location:
-                print("Sampled invalid reset location: {}".format(location))
-                print("World bounding box: {}".format(self.get_world_bounding_box()))
-                print("Score bounding box: {}".format(self.get_score_bounding_box()))
-        theta = self._get_origin_angle(location)
+        override_pose = self._before_reset_hooks()
+        if override_pose is not None:
+            pose = override_pose
+        if pose is not None:
+            reset_result = super(Environment, self)._reset(pose, **kwargs)
+            # Check if all actions are still possible after reset
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    print("WARNING: Sampled location collides after map reset. Adjust the clearing bbox")
+                for action_index in range(self.get_num_of_actions()):
+                    if self.is_action_colliding(pose, action_index, verbose=True):
+                        print("WARNING: Sampled location collides for action {} after map reset. "
+                              "Adjust the clearing bbox".format(action_index))
+                        break
+            self._after_reset_hooks()
+            return reset_result
         roll = 0
         pitch = 0
         if self._random_reset:
-            # yaw = 2 * np.pi * np.random.rand()
-            u = 2 * (np.random.rand() - 0.5)
-            yaw = theta + np.pi + u * np.pi / 8.
+            # yaw = 2 * np.pi * self._prng.rand()
+            u = self._prng.rand()
+            yaw = 2 * np.pi * u
         else:
             yaw = 0
         orientation_rpy = np.array([roll, pitch, yaw])
-        pose = self.Pose(location, orientation_rpy)
-        super(Environment, self).reset(pose, **kwargs)
+        center_location = 0.5 * (self.get_start_bounding_box().maximum() + self.get_start_bounding_box().minimum())
+        location_range = self.get_start_bounding_box().maximum() - self.get_start_bounding_box().minimum()
+        min_location = center_location - 0.5 * location_range
+        valid_location = False
+        reset_necessary = True
+        while not valid_location:
+            if reset_necessary:
+                cleared_world_bbox_with_surface_voxels_key = "cleared_world_bbox_with_surface_voxels"
+                if self.get_mapper().does_octomap_exist(cleared_world_bbox_with_surface_voxels_key):
+                    print("Loading cleared octomap with surface voxels")
+                    self.get_mapper().restore_octomap(cleared_world_bbox_with_surface_voxels_key)
+                    reset_necessary = False
+                else:
+                    print("Map reset")
+                    self.get_mapper().perform_reset()
+                    clear_occupancy = 0.0
+                    clear_observation_count = np.finfo(np.float32).max
+                    clear_world_bbox = self.get_world_bounding_box().scale(2)
+                    print("Override world bbox voxels")
+                    self.get_mapper().perform_override_bounding_box_voxels(
+                        clear_world_bbox, clear_occupancy, clear_observation_count, densify=False)
+                    print("Load surface voxels")
+                    self.get_mapper().perform_load_surface_voxels()
+                    print("Storing octomap at key {}".format(cleared_world_bbox_with_surface_voxels_key))
+                    self.get_mapper().store_octomap(cleared_world_bbox_with_surface_voxels_key)
+                    print("Done")
+                    reset_necessary = False
 
-    # # TODO: Make proper collision detection
-    def is_action_allowed_on_pose(self, pose, action_index):
-        return True
+            location = min_location + self._prng.rand(3) * location_range
+            assert(self.get_world_bounding_box().contains(location))
+            pose = self.Pose(location, orientation_rpy)
+            # Update pose so it is visible in Rviz
+            self._update_pose(pose)
+
+            if np.any(self._clear_extent > 0):
+                clear_bbox = math_utils.BoundingBox(- self._clear_extent / 2.,
+                                                    + self._clear_extent / 2.).move(location)
+            else:
+                clear_bbox = math_utils.BoundingBox.max_extent()
+
+            valid_location = True
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    valid_location = False
+                    # print("Sampled location with collision: {}".format(location))
+                else:
+                    for action_index in range(self.get_num_of_actions()):
+                        pose_after_action = self.simulate_action_on_pose(pose, action_index)
+                        if not clear_bbox.contains(pose_after_action.location()):
+                            valid_location = False
+                            # print("Action {} is colliding".format(action_index))
+                            break
+                        camera_bbox = self._collision_bbox.move(pose_after_action.location())
+                        if not clear_bbox.contains(camera_bbox):
+                            valid_location = False
+                            # print("Camera bbox is not contained in clear bbox after action {}".format(action_index))
+                            break
+                        if self.is_action_colliding(pose, action_index):
+                            # print("Action {} is colliding".format(action_index))
+                            valid_location = False
+                            break
+                if valid_location and self._collision_check_above_camera:
+                    if self.is_ray_colliding(pose.location(), pose.location() + np.array([0, 0, self._collision_check_above_camera_distance])):
+                        # print("Sampled location with collision above")
+                        valid_location = False
+            if not valid_location:
+                continue
+            if valid_location:
+                # Sanity check
+                if np.any(self._clear_extent > 0):
+                    res = self.get_mapper().perform_query_bbox(clear_bbox, 0)
+                    occupancies = np.asarray(res.occupancies)
+                    observation_certainties = np.asarray(res.observation_certainties)
+                    if np.any(occupancies > self._collision_occupancy_threshold):
+                        # print("WARNING: Invalid start location because of occupancies in clear bbox")
+                        # print(occupancies)
+                        valid_location = False
+                    if np.any(observation_certainties < self._collision_observation_certainty_threshold):
+                        # print("WARNING: Invalid start location because of observation certainties in clear bbox")
+                        # print(observation_certainties)
+                        valid_location = False
+            if not valid_location:
+                continue
+
+            reset_necessary = True
+            reset_result = super(Environment, self)._reset(pose, **kwargs)
+            # Check if all actions are still possible after reset
+            if not ignore_collision:
+                if self.is_pose_colliding(pose, verbose=True):
+                    valid_location = False
+                    print("WARNING: Sampled location collides after map reset. Adjust the clearing bbox")
+                for action_index in range(self.get_num_of_actions()):
+                    if self.is_action_colliding(pose, action_index, verbose=True):
+                        valid_location = False
+                        print("WARNING: Sampled location collides for action {} after map reset. "
+                              "Adjust the clearing bbox".format(action_index))
+                        break
+        self._after_reset_hooks()
+        return reset_result
 
 
 class SimpleV0Environment(BaseEnvironment):
@@ -721,16 +1128,13 @@ class SimpleV0Environment(BaseEnvironment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             random_reset (bool): Use random pose when resetting.
             radius (float): Radius of orbit.
             height (float): Height of orbit.
             yaw_amount (float): Scale of yaw rotations.
             angle_amount (float): Scale of orbital motion.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -793,7 +1197,7 @@ class SimpleV0Environment(BaseEnvironment):
         # theta = self._get_orbit_angle(pose)
         # pose = self._get_orbit_pose(theta)
         if self._random_reset:
-            theta = 2 * np.pi * np.random.rand()
+            theta = 2 * np.pi * self._prng.rand()
         else:
             theta = 0
         pose = self._get_orbit_pose(theta)
@@ -820,16 +1224,13 @@ class SimpleV1Environment(BaseEnvironment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             random_reset (bool): Use random pose when resetting.
             radius (float): Radius of orbit.
             height (float): Height of orbit.
             yaw_amount (float): Scale of yaw rotations.
             angle_amount (float): Scale of orbital motion.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -936,11 +1337,11 @@ class SimpleV1Environment(BaseEnvironment):
         # theta = self._get_orbit_angle(pose)
         # pose = self._get_orbit_pose(theta)
         if self._random_reset:
-            theta = 2 * np.pi * np.random.rand()
-            if np.random.rand() < 0.25:
-                yaw = 2 * np.pi * np.random.rand()
+            theta = 2 * np.pi * self._prng.rand()
+            if self._prng.rand() < 0.25:
+                yaw = 2 * np.pi * self._prng.rand()
             else:
-                d_yaw = np.pi / 4 * (np.random.rand() - 0.5)
+                d_yaw = np.pi / 4 * (self._prng.rand() - 0.5)
                 yaw = theta + np.pi + d_yaw
         else:
             theta = 0
@@ -973,16 +1374,13 @@ class SimpleV2Environment(BaseEnvironment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             random_reset (bool): Use random pose when resetting.
             radius (float): Radius of orbit.
             height (float): Height of orbit.
             yaw_amount (float): Scale of yaw rotations.
             angle_amount (float): Scale of orbital motion.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -1057,11 +1455,11 @@ class SimpleV2Environment(BaseEnvironment):
         # theta = self._get_orbit_angle(pose)
         # pose = self._get_orbit_pose(theta)
         if self._random_reset:
-            theta = 2 * np.pi * np.random.rand()
-            if np.random.rand() < 0.25:
-                yaw = 2 * np.pi * np.random.rand()
+            theta = 2 * np.pi * self._prng.rand()
+            if self._prng.rand() < 0.25:
+                yaw = 2 * np.pi * self._prng.rand()
             else:
-                d_yaw = np.pi / 4 * (np.random.rand() - 0.5)
+                d_yaw = np.pi / 4 * (self._prng.rand() - 0.5)
                 yaw = theta + np.pi + d_yaw
         else:
             theta = 0
@@ -1095,7 +1493,7 @@ class SimpleV3Environment(BaseEnvironment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             random_reset (bool): Use random pose when resetting.
             radius (float): Radius of orbit.
             height (float): Height of orbit.
@@ -1103,9 +1501,6 @@ class SimpleV3Environment(BaseEnvironment):
             pitch_amount (float): Scale of pitch rotations.
             angle_amount (float): Scale of orbital motion.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -1189,8 +1584,8 @@ class SimpleV3Environment(BaseEnvironment):
         # theta = self._get_orbit_angle(pose)
         # pose = self._get_orbit_pose(theta)
         if self._random_reset:
-            theta = 2 * np.pi * np.random.rand()
-            yaw = 2 * np.pi * np.random.rand()
+            theta = 2 * np.pi * self._prng.rand()
+            yaw = 2 * np.pi * self._prng.rand()
         else:
             theta = 0
             yaw = theta + np.pi
@@ -1221,15 +1616,12 @@ class VerySimpleEnvironment(BaseEnvironment):
             world_bounding_box (BoundingBox): Overall bounding box of the world to restrict motion.
             engine (BaseEngine): Simulation engine (i.e. Unreal Engine wrapper).
             mapper: Occupancy mapper (i.e. OctomapExt interface).
-            clear_size (float): Size of bounding box to clear in the occupancy map on reset.
+            clear_extent (float): Size of bounding box to clear in the occupancy map on reset.
             random_reset (bool): Use random pose when resetting.
             radius (float): Radius of orbit.
             height (float): Height of orbit.
             angle_amount (float): Scale of orbital motion.
             action_not_allowed_reward (float): Reward value for invalid actions (i.e. collision).
-            use_ros (bool): Whether to use ROS and publish on some topics.
-            ros_pose_topic (str): If ROS is used publish agent poses on this topic.
-            ros_world_frame (str): If ROS is used this is the id of the world frame.
         """
 
         self._random_reset = random_reset
@@ -1284,7 +1676,7 @@ class VerySimpleEnvironment(BaseEnvironment):
         # theta = self._get_orbit_angle(pose)
         # pose = self._get_orbit_pose(theta)
         if self._random_reset:
-            theta = 2 * np.pi * np.random.rand()
+            theta = 2 * np.pi * self._prng.rand()
         else:
             theta = 0
         pose = self._get_orbit_pose(theta)
