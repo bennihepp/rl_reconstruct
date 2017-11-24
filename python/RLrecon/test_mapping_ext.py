@@ -10,7 +10,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
 from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
 from RLrecon.contrib import transformations
-from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper_old import UnrealCVWrapper
 
 
 """Returns point cloud in camera frame. Assuming x-axis points forward, y-axis left and z-axis up."""

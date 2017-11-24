@@ -7,7 +7,7 @@ import tf
 import tf_conversions
 from geometry_msgs.msg import Transform
 from octomap_server_ext.srv import InsertPointCloud, InsertPointCloudRequest
-from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper_old import UnrealCVWrapper
 
 
 def run(engine):

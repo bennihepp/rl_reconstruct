@@ -10,7 +10,7 @@ from sensor_msgs.msg import PointCloud2
 from sensor_msgs.msg import PointField
 from octomap_server_ext.srv import RaycastCamera, RaycastCameraRequest
 from RLrecon.contrib import transformations
-from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper_old import UnrealCVWrapper
 import math_utils
 import ros_utils
 

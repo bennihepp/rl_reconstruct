@@ -2,7 +2,7 @@ import math_utils
 import ros_utils
 import rospy
 from RLrecon.environments.environment import SimpleV1Environment
-from engines.unreal_cv_wrapper import UnrealCVWrapper
+from engines.unreal_cv_wrapper_old import UnrealCVWrapper
 
 
 def run(environment):
