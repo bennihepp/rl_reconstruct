@@ -4,7 +4,7 @@ import numpy as np
 import rospy
 from RLrecon import math_utils
 from RLrecon.engines.dummy_engine import DummyEngine
-from RLrecon.engines.unreal_cv_wrapper import UnrealCVWrapper
+from RLrecon.engines.unreal_cv_wrapper_old import UnrealCVWrapper
 from gym import spaces
 
 
