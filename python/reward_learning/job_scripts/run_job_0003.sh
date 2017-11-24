@@ -2,49 +2,54 @@
 
 echo "RLRECONSTRUCT_PY_DIR=$RLRECONSTRUCT_PY_DIR"
 echo "DATA_PATH=$DATA_PATH"
+echo "TEST_DATA_PATH=$TEST_DATA_PATH"
 echo "MODEL_PATH=$MODEL_PATH"
 echo "LOG_PATH=$LOG_PATH"
 
-python ${RLRECONSTRUCT_PY_DIR}/reward_learning/train.py \
+python ${RLRECONSTRUCT_PY_DIR}/reward_learning/train_v4.py \
     --data-path $DATA_PATH \
-    --test-data-path $DATA_PATH \
+    --test-data-path $TEST_DATA_PATH \
     --store-path $MODEL_PATH \
     --log-path $LOG_PATH \
     \
-    --max_num_train_files 50 \
-    --max_num_test_files 50 \
+    --data.max_num_train_files -1 \
+    --data.max_num_test_files -1 \
+    --data.fake_constant_data false \
+    --data.fake_random_data false \
+    --data.input_stats_filename ${DATA_PATH}/data_stats.hdf5 \
+    --data.test_input_stats_filename ${TEST_DATA_PATH}/data_stats.hdf5 \
     \
-    --gpu_memory_fraction 0.5 \
-    --intra_op_parallelism 4 \
-    --inter_op_parallelism 4 \
+    --io.timeout 60 \
+    --io.validation_interval 5 \
+    --io.train_summary_interval 5 \
+    --io.model_summary_interval 5 \
+    --io.model_summary_num_batches 1 \
+    --io.checkpoint_int 5 \
     \
-    --num_epochs 100000 \
-    --batch_size 128 \
-    --optimizer "adam" \
-    --max_grad_global_norm "1e3" \
-    --initial_learning_rate "1e-3" \
-    --learning_rate_decay_epochs 25 \
-    --learning_rate_decay_rate 0.96 \
-    --learning_rate_decay_staircase "false" \
+    --tf.gpu_memory_fraction 0.3 \
+    --tf.intra_op_parallelism 4 \
+    --tf.inter_op_parallelism 4 \
+    --tf.cpu_train_queue_capacity $((1024 * 16)) \
+    --tf.cpu_test_queue_capacity $((1024 * 16)) \
+    --tf.cpu_train_queue_threads 4 \
+    --tf.cpu_test_queue_threads 1 \
+    --tf.log_device_placement false \
+    --tf.create_tf_timeline false \
     \
-    --target_id "mean_occupancy" \
-    --input_stats_filename ${DATA_PATH}/data_stats.hdf5 \
-    --obs_levels_to_use "1,2" \
-    --subvolume_slice_x "0,16" \
-    --subvolume_slice_y "0,16" \
-    --subvolume_slice_z "0,16" \
+    --training.num_epochs 50 \
+    --training.batch_size 512 \
+    --training.optimizer "adam" \
+    --training.max_grad_global_norm "1e3" \
+    --training.initial_learning_rate "1e-3" \
+    --training.learning_rate_decay_epochs 15 \
+    --training.learning_rate_decay_rate 0.96 \
     \
-    --num_convs_per_block 2 \
-    --initial_num_filters 8 \
-    --filter_increase_per_block 8 \
-    --filter_increase_within_block 0 \
-    --maxpool_after_each_block "true" \
-    --max_num_blocks -1 \
-    --max_output_grid_size 8 \
-    --dropout_rate 0.3 \
-    --add_biases_3dconv "false" \
-    --activation_fn_3dconv "relu" \
-    --num_units_regression "1024" \
-    --activation_fn_regression "relu" \
+    --config config_0003.yaml \
+    $@
 
-    #--test-data-path $TEST_DATA_PATH
+    # --gpu_id "0,1,2,3" \
+    #--keep_checkpoint_every_n_hours 2 \
+    #--keep_n_last_checkpoints 5 \
+    #--test-data-path $TEST_DATA_PATH \
+    #--learning_rate_decay_staircase \
+    #--add_biases_3dconv \

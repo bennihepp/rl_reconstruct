@@ -1,0 +1,106 @@
+# Depth prediction small_camera
+
+data:
+  input:
+    id: "in_grid_3d[2,3,4,5,6,7]"
+    subvolume_slice_x: "0,16"
+    subvolume_slice_y: "0,16"
+    subvolume_slice_z: "0,16"
+    # obs_levels_to_use: "1,2"
+    normalize: true
+  target:
+    id: "depth_image"
+    clip_min: 0.0
+    clip_max: 20.0
+    # image_size: [1, 256]
+    normalize: true
+
+  # fake_constant_data: true
+
+io:
+  debug_performance: true
+  debug_numerics: true
+  image_summary: true
+  image_summary_count: 20
+  # debug_queues: true
+  debug_summary: true
+  image_summary_clip_min: [0.0]
+  image_summary_clip_max: [20.0]
+  image_summary_clip_scale: true
+  #image_summary_tile_multiples: [1, 1, 1, 1]
+
+model:
+  modules:
+    -
+      type: conv3d_module
+      options:
+        activation_fn: relu
+        add_bias: false
+        dropout_rate: 0.5
+        filter_increase_per_block: 0
+        filter_increase_within_block: 8
+        initial_num_filters: 12
+        max_num_blocks: -1
+        max_output_grid_size: 4
+        maxpool_after_each_block: true
+        num_convs_per_block: 4
+        use_batch_norm: true
+
+    -
+      type: fully_connected_module
+      options:
+        activation_fn: relu
+        num_units: [2000]
+        # add_bias: false
+        fully_convolutional: false
+        use_batch_norm: true
+
+    -
+      type: reshape
+      options:
+        output_shape: [5, 5, -1]
+
+    # -
+    #   type: regression
+    #   options:
+    #     activation_fn: relu
+    #     num_units: '[1024, 1024]'
+    #     use_batch_norm: true
+
+    -
+      type: upsampling2d_module
+      options:
+        target_shape: [80, 80, 1]
+        activation_fn: relu
+        num_convs_per_block: 2
+        use_batch_norm: true
+        filter_decrease_per_block: 0
+        filter_decrease_within_block: 8
+        # filter_decrease_within_block: 16
+
+    # -
+    #   type: expand_dims
+    #   options:
+    #     axis: 1
+
+    # -
+    #   type: resize_images
+    #   options:
+    #     size: [1, 320]
+    #     method: 'bilinear'
+
+    -
+      type: slice
+      options:
+        slices: [[10, 70], [], []]
+
+    -
+      type: clip
+      options:
+        min: 0.0
+        max: 20.0
+
+  loss:
+    reduce_mode: "mean"
+    regularization_mode: "l2_norm"
+    regularization_lambda: 1e-2

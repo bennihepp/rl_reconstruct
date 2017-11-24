@@ -1,0 +1,55 @@
+data:
+  input:
+    id: "in_grid_3d[0:8]"
+    subvolume_slice_x: "0:16"
+    subvolume_slice_y: "0:16"
+    subvolume_slice_z: "0:16"
+    normalize: true
+  target:
+    id: "prob_reward"
+    normalize: false
+
+io:
+  debug_summary: true
+  #debug_queues: true
+
+model:
+  modules:
+    -
+      type: conv3d_module
+      options:
+        activation_fn: relu
+        add_bias: false
+        dropout_rate: 0.5
+        filter_increase_per_block: 0
+        filter_increase_within_block: 8
+        initial_num_filters: 12
+        max_num_blocks: -1
+        max_output_grid_size: 4
+        shrink_after_each_block: true
+        shrink_with_maxpool: true
+        batch_norm_after_shrink_conv: true
+        num_convs_per_block: 4
+        use_residual_units: false
+        use_batch_norm: true
+        batch_norm_after_activation: false
+
+    -
+      type: regression_module
+      options:
+        activation_fn: relu
+        num_units: [1024, 1024]
+        use_batch_norm: true
+
+  loss:
+    reduce_mode: "mean"
+    regularization_mode: "l2_norm"
+    regularization_lambda: 1e-5
+
+  # upsampling:
+  #   activation_fn: relu
+  #   num_convs_per_block: 4
+  #   add_bias: true
+  #   use_batch_norm: true
+  #   filter_decrease_per_block: 8
+    # filter_decrease_within_block: 16

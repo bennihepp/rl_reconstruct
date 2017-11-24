@@ -1,0 +1,38 @@
+data:
+  input_id: "in_grid_3d[2,3,4,5,6,7]"
+  target_id: "prob_reward"
+  # obs_levels_to_use: "1,2"
+  subvolume_slice_x: "0,16"
+  subvolume_slice_y: "0,16"
+  subvolume_slice_z: "0,16"
+  normalize_input: true
+  normalize_target: false
+
+model:
+  loss_mode: "mean"
+
+  conv3d:
+    activation_fn: relu
+    add_bias: false
+    dropout_rate: 0.5
+    filter_increase_per_block: 0
+    filter_increase_within_block: 8
+    initial_num_filters: 12
+    max_num_blocks: -1
+    max_output_grid_size: 4
+    maxpool_after_each_block: true
+    num_convs_per_block: 4
+    use_batch_norm: true
+
+  regression:
+    activation_fn: relu
+    num_units: '[1024, 1024]'
+    use_batch_norm: true
+
+  # upsampling:
+  #   activation_fn: relu
+  #   num_convs_per_block: 4
+  #   add_bias: true
+  #   use_batch_norm: true
+  #   filter_decrease_per_block: 8
+    # filter_decrease_within_block: 16

@@ -1,0 +1,136 @@
+data:
+  input:
+    id: "in_grid_3d[0:10]"
+    subvolume_slice_x: "0:16"
+    subvolume_slice_y: "0:16"
+    subvolume_slice_z: "0:16"
+    normalize: true
+  target:
+    id: "prob_reward"
+    normalize: false
+  weight:
+    weight_power: 1.3
+    num_bins: 20
+    weight_truncation: 5
+
+io:
+  debug_summary: true
+  #debug_queues: true
+
+model:
+  modules:
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 20
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 28
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 36
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 44
+        activation_fn: relu
+        use_batch_norm: true
+
+    -
+      type: shrink3d
+      options:
+        with_maxpool: true
+
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 44
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 52
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 60
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 68
+        activation_fn: relu
+        use_batch_norm: true
+
+    -
+      type: shrink3d
+      options:
+        with_maxpool: true
+
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 68
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 76
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 84
+        activation_fn: relu
+        use_batch_norm: true
+    -
+      type: conv3d_layer
+      options:
+        num_filters: 92
+        activation_fn: relu
+        use_batch_norm: true
+
+    -
+      type: shrink3d
+      options:
+        with_maxpool: true
+
+    -
+      type: dropout_layer
+      options:
+        dropout_rate: 0.2
+
+    -
+      type: regression_module
+      options:
+        num_units: [1024, 1024]
+        activation_fn: relu
+        use_batch_norm: true
+
+  loss:
+    reduce_mode: "mean"
+    regularization_mode: "l2_norm"
+    regularization_lambda: 1e-5
+
+  # upsampling:
+  #   activation_fn: relu
+  #   num_convs_per_block: 4
+  #   add_bias: true
+  #   use_batch_norm: true
+  #   filter_decrease_per_block: 8
+    # filter_decrease_within_block: 16
+
