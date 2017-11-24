@@ -34,6 +34,8 @@
 #ifndef OCTOMAP_OCTREE_EXT_NODE_H
 #define OCTOMAP_OCTREE_EXT_NODE_H
 
+#define EXTENDED_VOXEL_STATE 0
+
 #include "octomap_types.h"
 #include "octomap_utils.h"
 #include "OcTreeNode.h"
@@ -54,8 +56,12 @@ namespace octomap {
     public:
 
         OcTreeExtNode();
-        OcTreeExtNode(const float log_odds, const float observation_count,
-                      const float min_observation_count, const float max_observation_count);
+        OcTreeExtNode(const float log_odds, const float observation_count
+#if EXTENDED_VOXEL_STATE
+                      ,
+                      const float min_observation_count, const float max_observation_count
+#endif
+                      );
 
         /// Copy constructor, performs a recursive deep-copy of all children
         /// including node data in "value"
@@ -106,6 +112,7 @@ namespace octomap {
           return observation_count;
         }
 
+#if EXTENDED_VOXEL_STATE
         inline float getMinObservationCount() const {
           return min_observation_count;
         }
@@ -113,11 +120,13 @@ namespace octomap {
         inline float getMaxObservationCount() const {
           return max_observation_count;
         }
+#endif
 
         inline void setObservationCount(float count) {
           observation_count = count;
         }
 
+#if EXTENDED_VOXEL_STATE
         inline void setMinObservationCount(float count) {
           min_observation_count = count;
         }
@@ -125,6 +134,7 @@ namespace octomap {
         inline void setMaxObservationCount(float count) {
           max_observation_count = count;
         }
+#endif
 
         /**
          * @return mean of all children's occupancy probabilities, in log odds
@@ -146,8 +156,10 @@ namespace octomap {
         inline void updateOccupancyChildren() {
           this->setLogOdds(this->getMaxChildLogOdds());  // conservative
           this->setObservationCount(this->getMeanChildObservationCount());
+#if EXTENDED_VOXEL_STATE
           this->setMinObservationCount(this->getChildMinObservationCount());
           this->setMaxObservationCount(this->getChildMaxObservationCount());
+#endif
         }
 
     protected:
@@ -160,8 +172,10 @@ namespace octomap {
         /// stored data (payload)
         float log_odds;
         float observation_count;
+#if EXTENDED_VOXEL_STATE
         float min_observation_count;
         float max_observation_count;
+#endif
     };
 
 } // end namespace

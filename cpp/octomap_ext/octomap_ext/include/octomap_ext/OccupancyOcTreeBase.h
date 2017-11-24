@@ -486,6 +486,7 @@ namespace octomap {
     
     void toMaxLikelihoodRecurs(NODE* node, unsigned int depth, unsigned int max_depth);
 
+    void createRootNode();
 
   protected:
     bool use_bbx_limit;  ///< use bounding box for queries (needs to be set)?

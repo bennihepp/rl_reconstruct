@@ -220,8 +220,6 @@ namespace octomap {
         float getClampingThresMaxLog() const {return clamping_thres_max; }
 
 
-
-
     protected:
         /// Try to read the old binary format for conversion, will be removed in the future
         bool readBinaryLegacyHeader(std::istream &s, unsigned int& size, double& res);

@@ -443,6 +443,20 @@ namespace octomap {
      */
     std::ostream& writeBinaryData(std::ostream &s) const;
 
+    /**
+     * Create node at root of octree (if not already there).
+     */
+    void createRootNode();
+
+    /**
+     * Get key of root node.
+     */
+    OcTreeKey getRootKey() const;
+
+    /**
+     * Return max octree key value.
+     */
+    key_type getTreeMaxValue() const;
 
     /**
      * Updates the occupancy of all inner nodes to reflect their children's occupancy.

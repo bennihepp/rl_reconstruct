@@ -59,7 +59,7 @@ include_directories(${MLIB_INCLUDE_DIR} ${MLIB_SOURCE_DIR})
 set(LIBBH_ROOT "$ENV{HOME}/src/libbh")
 set(LIBBH_INCLUDE_DIR "${LIBBH_ROOT}/include")
 set(LIBBH_SOURCE_DIR "${LIBBH_ROOT}/src")
-set(LIBBH_SOURCES "${LIBBH_SOURCE_DIR}/mLib/mLib.cpp")
+set(LIBBH_SOURCES "${LIBBH_SOURCE_DIR}/bh/mLib/mLib.cpp")
 include_directories(${LIBBH_INCLUDE_DIR})
 set(LIBBH_LIBRARIES "${LIBBH_ROOT}/libbh.so")
 
@@ -67,6 +67,7 @@ set(LIBBH_LIBRARIES "${LIBBH_ROOT}/libbh.so")
 add_message_files(
   FILES
   Ray.msg
+  Voxel.msg
 )
 
 ## Declare ROS messages and services
@@ -80,8 +81,11 @@ add_service_files(
   RaycastCamera.srv
   QueryVoxels.srv
   QuerySubvolume.srv
+  QueryBBox.srv
   ClearBoundingBox.srv
   OverrideBoundingBox.srv
+  Storage.srv
+  Reset.srv
 )
 
 ## Generate added messages and services
@@ -105,13 +109,23 @@ set(LINK_LIBS
   ${PCL_LIBRARIES}
 )
 
-add_library(${PROJECT_NAME} src/OctomapServerExt.cpp include/octomap_server_ext/conversions_msg.h)
+add_library(${PROJECT_NAME}
+    src/OctomapServerExt.cpp
+    include/octomap_server_ext/conversions_msg.h
+)
 target_link_libraries(${PROJECT_NAME} ${LINK_LIBS})
-add_dependencies(${PROJECT_NAME} ${PROJECT_NAME}_gencfg)
+add_dependencies(
+    ${PROJECT_NAME}
+    ${PROJECT_NAME}_gencfg
+    ${${PROJECT_NAME}_EXPORTED_TARGETS}
+)
 
 add_executable(octomap_server_ext_node src/octomap_server_ext_node.cpp)
 target_link_libraries(octomap_server_ext_node ${PROJECT_NAME} ${LINK_LIBS})
-add_dependencies(octomap_server_ext_node ${PROJECT_NAME}_gencfg)
+add_dependencies(
+    octomap_server_ext_node
+    ${PROJECT_NAME}_gencfg
+)
 
 #add_executable(octomap_color_server_node src/octomap_color_server_node.cpp)
 #target_link_libraries(octomap_color_server_node ${PROJECT_NAME} ${LINK_LIBS})

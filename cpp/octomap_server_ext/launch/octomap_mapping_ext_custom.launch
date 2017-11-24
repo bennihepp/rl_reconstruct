@@ -1,3 +1,5 @@
+<?xml version="1.0"?>
+
 <launch>
 
   <arg name="surface_voxels_filename" default="" />
@@ -7,10 +9,12 @@
   <arg name="naive_scan_insertion" />
   <arg name="use_only_surface_voxels_for_score" />
   <arg name="observation_count_saturation" />
+  <arg name="point_cloud_filter_factor" />
   <arg name="voxel_occupied_threshold" />
   <arg name="voxel_free_threshold" />
+  <arg name="octomap_server_ext_namespace" default="octomap_server_ext" />
 
-  <node name="octomap_server_ext" pkg="octomap_server_ext" type="octomap_server_ext_node" output="screen">
+  <node name="$(arg octomap_server_ext_namespace)" pkg="octomap_server_ext" type="octomap_server_ext_node" output="screen">
 
     <!-- enable debug level logging -->
     <param name="log_debug" value="true" type="bool" />
@@ -58,8 +62,14 @@
     <!-- Observation count saturation -->
     <param name="observation_count_saturation" value="$(arg observation_count_saturation)" type="double" />
 
+    <!-- Factor for leaf size of voxel grid filter for point clouds -->
+    <param name="point_cloud_filter_factor" value="$(arg point_cloud_filter_factor)" type="double" />
+
     <!-- Latch messages? -->
     <param name="latch" value="false" type="bool" />
+
+    <!-- Publish free space -->
+    <param name="publish_free_space" value="true" type="bool" />
 
   </node>
 </launch>

@@ -1,4 +1,4 @@
-geometry_msgs/Point[] voxels
+Voxel[] voxels
 ---
 float32 elapsed_seconds
 int32 num_occupied

@@ -30,6 +30,7 @@
 #ifndef OCTOMAP_SERVER_OCTOMAPSERVER_EXT_H
 #define OCTOMAP_SERVER_OCTOMAPSERVER_EXT_H
 
+#include <unordered_map>
 #include <unordered_set>
 #include <tuple>
 
@@ -72,12 +73,16 @@
 #include <octomap_server_ext/InsertDepthMap.h>
 #include <octomap_server_ext/QueryVoxels.h>
 #include <octomap_server_ext/QuerySubvolume.h>
+#include <octomap_server_ext/QueryBBox.h>
 #include <octomap_server_ext/Raycast.h>
 #include <octomap_server_ext/RaycastCamera.h>
+#include <octomap_server_ext/Storage.h>
+#include <octomap_server_ext/Reset.h>
 
 #include <octomap_ros/conversions.h>
 #include <octomap_ext/octomap.h>
 #include <octomap_ext/OcTreeKey.h>
+#include <octomap_ext/OcTreeExtNode.h>
 
 #include <bh/eigen.h>
 #include <bh/math/utilities.h>
@@ -118,8 +123,10 @@ public:
       };
       float occupancy;
       float observation_certainty;
+#if EXTENDED_VOXEL_STATE
       float min_observation_certainty;
       float max_observation_certainty;
+#endif
   };
 
   struct PointXYZExt {
@@ -179,8 +186,10 @@ public:
   struct QuerySubvolumeResult {
       std::vector<float> occupancies;
       std::vector<float> observation_certainties;
+#if EXTENDED_VOXEL_STATE
       std::vector<float> min_observation_certainties;
       std::vector<float> max_observation_certainties;
+#endif
   };
 
   struct RaycastResult {
@@ -215,7 +224,11 @@ public:
   virtual ~OctomapServerExt();
   virtual bool octomapBinarySrv(OctomapSrv::Request  &req, OctomapSrv::GetOctomap::Response &res);
   virtual bool octomapFullSrv(OctomapSrv::Request  &req, OctomapSrv::GetOctomap::Response &res);
-  bool resetSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
+  bool resetSrv(Reset::Request& req, Reset::Response& resp);
+  bool loadSurfaceVoxelsSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
+  bool pushOctomapSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
+  bool popOctomapSrv(std_srvs::Empty::Request& req, std_srvs::Empty::Response& resp);
+  bool storageSrv(Storage::Request& req, Storage::Response& resp);
 
   void filterHeightPointCloud(PCLPointCloud& cloud);
   virtual bool infoSrv(Info::Request &req, Info::Response &res);
@@ -227,6 +240,7 @@ public:
   virtual bool insertPointCloudSrv(InsertPointCloud::Request &req, InsertPointCloud::Response &res);
   virtual bool queryVoxelsSrv(QueryVoxels::Request &req, QueryVoxels::Response &res);
   virtual bool querySubvolumeSrv(QuerySubvolume::Request &req, QuerySubvolume::Response &res);
+  virtual bool queryBBoxSrv(QueryBBox::Request &req, QueryBBox::Response &res);
   virtual bool raycastSrv(Raycast::Request &req, Raycast::Response &res);
   virtual bool raycastCameraSrv(RaycastCamera::Request &req, RaycastCamera::Response &res);
   void subvolumePointCloudToROSMsg(const SubvolumePointCloud& pcl_cloud, sensor_msgs::PointCloud2& ros_cloud);
@@ -237,7 +251,6 @@ public:
   void readBinarySurfaceVoxels(const std::string& filename);
   bool isPointInScoreBoundingBox(const octomap::point3d& point) const;
   std::tuple<double, double, double, double> computeScore(const OcTreeT* octree) const;
-  std::tuple<double, double, double, double> computeScore2(const OcTreeT* octree) const;
 
 protected:
   inline static void updateMinKey(const octomap::OcTreeKey& in, octomap::OcTreeKey& min) {
@@ -264,6 +277,7 @@ protected:
   void reconfigureCallback(octomap_server_ext::OctomapServerExtConfig& config, uint32_t level);
   void publishBinaryOctoMap(const ros::Time& rostime = ros::Time::now()) const;
   void publishFullOctoMap(const ros::Time& rostime = ros::Time::now()) const;
+  void publishSurfaceVoxelArray(const ros::Time& rostime = ros::Time::now()) const;
   virtual void publishAll(const ros::Time& rostime = ros::Time::now());
 
   bh::Vector3f octomapToBh(const octomath::Vector3& v_octo) const {
@@ -280,6 +294,8 @@ protected:
 
   InsertPointCloudResult insertPointCloud(const tf::Point& sensorOriginTf, PCLPointCloud& pc,
                                           const bool simulate = false);
+
+  void publishPointCloudRays(const tf::Point& sensorOriginTf, PCLPointCloud& pc);
 
   /**
   * @brief override occupancy of a bounding box volume
@@ -298,7 +314,7 @@ protected:
   * @param voxels The voxels to query
   * @return Results of the query
   */
-  virtual QueryVoxelsResult queryVoxels(const std::vector<octomath::Vector3>& voxels);
+  virtual QueryVoxelsResult queryVoxels(const std::vector<std::tuple<octomath::Vector3, std::int32_t>>& voxels);
 
   /**
    * @brief Helper function to compute certainty based on observation count
@@ -309,6 +325,11 @@ protected:
    * @brief Helper function to compute certainty based on observation count
    */
   double computeObservationCertainty(const OcTreeNodeT* node) const;
+
+  /**
+   * @brief Helper function to compute observation count based on observation certainty
+   */
+  double computeObservationCount(const double observation_certainty) const;
 
   /**
    * @brief Helper function to perform trilinear interpolation
@@ -338,6 +359,22 @@ protected:
                                               const uint32_t level,
                                               const uint32_t size_x, const uint32_t size_y, const uint32_t size_z,
                                               const uint32_t axis_mode);
+
+  /**
+  * @brief perform a query of a bbox from the occupancy map
+  *
+  * @param bbox_min The minimum of the bbox
+  * @param bbox_max The maximum of the bbox
+  * @param level The level of detail to return (0 is highest detail)
+  * @return Results of the query
+  */
+  virtual QuerySubvolumeResult queryBBox(const octomath::Vector3& bbox_min,
+                                         const octomath::Vector3& bbox_max,
+                                         const uint32_t level,
+                                         octomath::Vector3& voxel_min,
+                                         octomath::Vector3& voxel_max,
+                                         const bool dense = false,
+                                         const bool only_voxels_inside_bbox = false);
 
   /**
   * @brief perform raycast of rays
@@ -495,6 +532,7 @@ protected:
   static std_msgs::ColorRGBA heightMapColor(double h);
   ros::NodeHandle m_nh;
   ros::Publisher  m_markerPub, m_binaryMapPub, m_fullMapPub, m_pointCloudPub, m_collisionObjectPub, m_mapPub, m_cmapPub, m_fmapPub, m_fmarkerPub;
+  ros::Publisher m_surfaceVoxelPub, m_rayPub;
   ros::Publisher m_subvolumePointCloudPub;
   message_filters::Subscriber<sensor_msgs::PointCloud2>* m_pointCloudSub;
   tf::MessageFilter<sensor_msgs::PointCloud2>* m_tfPointCloudSub;
@@ -505,15 +543,19 @@ protected:
   ros::ServiceServer m_insertDepthMapService;
   ros::ServiceServer m_queryVoxelsService;
   ros::ServiceServer m_querySubvolumeService;
+  ros::ServiceServer m_queryBBoxService;
   ros::ServiceServer m_raycastService;
   ros::ServiceServer m_raycastCameraService;
-  ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_resetService;
+  ros::ServiceServer m_octomapBinaryService, m_octomapFullService, m_resetService, m_loadSurfaceVoxelsService;
+  ros::ServiceServer m_pushOctomapService, m_popOctomapService, m_storageService;
   ros::ServiceServer m_setScoreBoundingBoxService;
   tf::TransformListener m_tfListener;
   boost::recursive_mutex m_config_mutex;
   dynamic_reconfigure::Server<OctomapServerExtConfig> m_reconfigureServer;
 
   OcTreeT* m_octree;
+  std::stack<OcTreeT*> m_octreeStack;
+  std::unordered_map<std::string, OcTreeT*> m_octreeStorage;
   mutable octomap::KeyRay m_keyRay;  // temp storage for ray casting
   octomap::OcTreeKey m_updateBBXMin;
   octomap::OcTreeKey m_updateBBXMax;
@@ -575,6 +617,7 @@ protected:
   double m_scorePerSurfaceVoxel;
   bool m_useOnlySurfaceVoxelsForScore;
   double m_observation_count_saturation;
+  double m_point_cloud_filter_factor;
 
   octomap::point3d m_scoreBoundingBoxMin;
   octomap::point3d m_scoreBoundingBoxMax;

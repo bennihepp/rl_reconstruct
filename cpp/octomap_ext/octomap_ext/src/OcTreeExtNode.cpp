@@ -43,27 +43,43 @@
 namespace octomap {
 
   OcTreeExtNode::OcTreeExtNode()
-    : children(nullptr), log_odds(0.0f), observation_count(0.0f),
-      min_observation_count(0.0f), max_observation_count(0.0f) {
+    : children(nullptr), log_odds(0.0f), observation_count(0.0f)
+#if EXTENDED_VOXEL_STATE
+      ,
+      min_observation_count(0.0f), max_observation_count(0.0f)
+#endif
+  {
   }
 
   OcTreeExtNode::OcTreeExtNode(const float log_odds,
-                               const float observation_count,
+                               const float observation_count
+#if EXTENDED_VOXEL_STATE
+                               ,
                                const float min_observation_count,
-                               const float max_observation_count)
+                               const float max_observation_count
+#endif
+                               )
           : children(nullptr),
             log_odds(log_odds),
-            observation_count(observation_count),
+            observation_count(observation_count)
+#if EXTENDED_VOXEL_STATE
+            ,
             min_observation_count(min_observation_count),
-            max_observation_count(max_observation_count) {
+            max_observation_count(max_observation_count)
+#endif
+            {
   }
 
   OcTreeExtNode::OcTreeExtNode(const OcTreeExtNode& rhs)
           : children(nullptr),
             log_odds(rhs.log_odds),
-            observation_count(rhs.observation_count),
+            observation_count(rhs.observation_count)
+#if EXTENDED_VOXEL_STATE
+            ,
             min_observation_count(rhs.min_observation_count),
-            max_observation_count(rhs.max_observation_count) {
+            max_observation_count(rhs.max_observation_count)
+#endif
+            {
     if (rhs.children != NULL) {
       allocChildren();
       for (unsigned i = 0; i < 8; ++i){
@@ -80,15 +96,20 @@ namespace octomap {
   void OcTreeExtNode::copyData(const OcTreeExtNode& from){
     log_odds = from.log_odds;
     observation_count = from.observation_count;
+#if EXTENDED_VOXEL_STATE
     min_observation_count = from.min_observation_count;
     max_observation_count = from.max_observation_count;
+#endif
   }
 
   bool OcTreeExtNode::operator== (const OcTreeExtNode& rhs) const{
     return rhs.log_odds == log_odds
            && rhs.observation_count == observation_count
+#if EXTENDED_VOXEL_STATE
            && rhs.min_observation_count == min_observation_count
-           && rhs.max_observation_count == max_observation_count;
+           && rhs.max_observation_count == max_observation_count
+#endif
+           ;
   }
 
 
@@ -99,8 +120,10 @@ namespace octomap {
   std::istream& OcTreeExtNode::readData(std::istream &s) {
     s.read((char*) &log_odds, sizeof(log_odds));
     s.read((char*) &observation_count, sizeof(observation_count));
+#if EXTENDED_VOXEL_STATE
     s.read((char*) &min_observation_count, sizeof(min_observation_count));
     s.read((char*) &max_observation_count, sizeof(max_observation_count));
+#endif
     return s;
   }
 
@@ -108,8 +131,10 @@ namespace octomap {
   std::ostream& OcTreeExtNode::writeData(std::ostream &s) const{
     s.write((const char*) &log_odds, sizeof(log_odds));
     s.write((const char*) &observation_count, sizeof(observation_count));
+#if EXTENDED_VOXEL_STATE
     s.write((const char*) &min_observation_count, sizeof(min_observation_count));
     s.write((const char*) &max_observation_count, sizeof(max_observation_count));
+#endif
     return s;
   }
 
@@ -136,6 +161,7 @@ namespace octomap {
     return mean / 8.0f;
   }
 
+#if EXTENDED_VOXEL_STATE
   float OcTreeExtNode::getChildMinObservationCount() const {
     float min = std::numeric_limits<float>::max();
 
@@ -167,6 +193,7 @@ namespace octomap {
     }
     return max;
   }
+#endif
 
   double OcTreeExtNode::getMeanChildLogOdds() const{
     double mean = 0;
@@ -204,8 +231,10 @@ namespace octomap {
   void OcTreeExtNode::addObservation(const float& log_odds) {
     this->log_odds += log_odds;
     ++this->observation_count;
+#if EXTENDED_VOXEL_STATE
     ++this->min_observation_count;
     ++this->max_observation_count;
+#endif
   }
 
 } // end namespace

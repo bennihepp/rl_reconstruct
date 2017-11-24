@@ -117,6 +117,7 @@ protected:
   rviz::RosTopicProperty* octomap_topic_property_;
   rviz::EnumProperty* octree_render_property_;
   rviz::EnumProperty* octree_coloring_property_;
+  rviz::BoolProperty* octree_observation_certainty_property_;
   rviz::IntProperty* tree_depth_property_;
   rviz::FloatProperty* alpha_property_;
   rviz::FloatProperty* max_height_property_;

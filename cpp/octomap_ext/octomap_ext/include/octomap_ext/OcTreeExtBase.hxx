@@ -299,6 +299,23 @@ namespace octomap {
     return setNodeValue(key, log_odds_value, lazy_eval);
   }
 
+  template <class NODE>
+  void OcTreeExtBase<NODE>::createRootNode() {
+    if (this->root == NULL){
+      this->root = new NODE();
+      this->tree_size++;
+    }
+  }
+
+  template <class NODE>
+  OcTreeKey OcTreeExtBase<NODE>::getRootKey() const {
+    return OcTreeKey(this->tree_max_val, this->tree_max_val, this->tree_max_val);
+  }
+
+  template <class NODE>
+  key_type OcTreeExtBase<NODE>::getTreeMaxValue() const {
+    return this->tree_max_val;
+  }
 
   template <class NODE>
   NODE* OcTreeExtBase<NODE>::updateNode(const OcTreeKey& key, float log_odds_update, bool lazy_eval) {

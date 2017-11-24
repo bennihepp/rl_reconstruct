@@ -1,0 +1,4 @@
+bool keep_map
+bool reset_stack
+bool reset_storage
+---

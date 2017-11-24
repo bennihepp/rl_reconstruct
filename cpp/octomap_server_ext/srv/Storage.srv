@@ -1,0 +1,16 @@
+int32 storage_mode
+int32 STORAGE_MODE_MEMORY = 0
+#int32 STORAGE_MODE_FILE = 1
+
+int32 operation
+int32 OPERATION_STORE = 0
+int32 OPERATION_RESTORE = 1
+int32 OPERATION_RESTORE_AND_DELETE = 2
+int32 OPERATION_DELETE = 3
+int32 OPERATION_EXISTS = 4
+
+# key for storing the octomap (filename if STORAGE_MODE_FILE)
+string key
+---
+float32 elapsed_seconds
+bool result

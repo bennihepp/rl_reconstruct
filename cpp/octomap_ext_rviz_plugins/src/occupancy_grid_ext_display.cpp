@@ -146,6 +146,11 @@ OccupancyGridExtDisplay::OccupancyGridExtDisplay() :
                                                                     "Defines the observation count saturation",
                                                                     this,
                                                                     SLOT ( updateOctreeColorMode() ) );
+
+  octree_observation_certainty_property_ = new rviz::BoolProperty( "Use observation certainty", true,
+                                                                   "Use observation certainty instead of count for coloring",
+                                                                   this,
+                                                                   SLOT( updateOctreeColorMode() ) );
 }
 
 void OccupancyGridExtDisplay::onInitialize()
@@ -432,10 +437,19 @@ void TemplatedOccupancyGridExtDisplay<octomap::OcTreeExt>::setVoxelColor(PointCl
       newPoint.setColor((1.0f-cell_probability), cell_probability, 0.0);
       break;
     case OCTOMAP_OBSERVATION_COUNT_COLOR:
-      observation_count = node.getObservationCount();
-      observation_count /= octree_observation_count_saturation_property_->getFloat();
-      observation_count = std::min(observation_count, 1.0f);
-      newPoint.setColor((1.0f-observation_count), observation_count, observation_count);
+      {
+        const bool use_observation_certainty = static_cast<bool>(octree_observation_certainty_property_->getBool());
+        const float observation_count_saturation = octree_observation_count_saturation_property_->getFloat();
+        observation_count = node.getObservationCount();
+        if (use_observation_certainty) {
+          observation_count = 1 - std::exp(-observation_count / observation_count_saturation);
+        }
+        else {
+          observation_count /= octree_observation_count_saturation_property_->getFloat();
+          observation_count = std::min(observation_count, 1.0f);
+        }
+        newPoint.setColor((1.0f - observation_count), observation_count, observation_count);
+      }
       break;
     default:
       break;

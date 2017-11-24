@@ -21,6 +21,13 @@ float64 prob_hit_log_odds
 float64 prob_miss
 float64 prob_miss_log_odds
 
+float64 voxel_occupied_threshold
+float64 voxel_free_threshold
+float64 observation_count_saturation
+
+geometry_msgs/Point score_bbox_min
+geometry_msgs/Point score_bbox_max
+
 float64 score
 float64 normalized_score
 float64 probabilistic_score

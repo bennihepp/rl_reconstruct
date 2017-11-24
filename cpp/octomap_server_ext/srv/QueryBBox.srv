@@ -1,0 +1,19 @@
+geometry_msgs/Point bbox_min
+geometry_msgs/Point bbox_max
+int32 level
+bool dense
+bool only_voxels_inside_bbox
+---
+float32 elapsed_seconds
+# Minimum voxel coordinate in the bbox
+geometry_msgs/Vector3 voxel_min
+# Maximum voxel coordinate in the bbox
+geometry_msgs/Vector3 voxel_max
+# Size of voxels in queried bbox
+float32 voxel_size
+# Data as a dense 3-dimensional array.
+# occupancy(xi, yi, zi) = occupancies[xi + yi*size_x + zi*size_x*size_y]
+float32[] occupancies
+float32[] observation_certainties
+float32[] min_observation_certainties
+float32[] max_observation_certainties

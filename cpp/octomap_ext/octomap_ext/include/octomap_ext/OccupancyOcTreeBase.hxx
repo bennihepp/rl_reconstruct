@@ -491,6 +491,14 @@ namespace octomap {
   }
 
   template <class NODE>
+  void OccupancyOcTreeBase<NODE>::createRootNode(){
+    if (this->root == NULL){
+      this->root = new NODE();
+      this->tree_size++;
+    }
+  }
+
+  template <class NODE>
   void OccupancyOcTreeBase<NODE>::updateInnerOccupancy(){
     if (this->root)
       this->updateInnerOccupancyRecurs(this->root, 0);

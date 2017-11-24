@@ -58,7 +58,8 @@ class MapSaver{
         const ml::BoundingBox3f ml_bbox(
                 ml::vec3f(voxel(0) - size / 2, voxel(1) - size / 2, voxel(2) - size / 2),
                 ml::vec3f(voxel(0) + size / 2, voxel(1) + size / 2, voxel(2) + size / 2));
-        const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox);
+        const ml::vec4f ml_color(it->getOccupancy(), 0.5, 0, 1);
+        const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox, ml_color);
         output_meshes.push_back(output_mesh);
       }
     }

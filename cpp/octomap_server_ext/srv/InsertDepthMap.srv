@@ -11,6 +11,8 @@ float32 focal_length_y
 float32 principal_point_x
 float32 principal_point_y
 
+float32 max_depth
+
 bool downsample_to_grid
 bool simulate
 ---
