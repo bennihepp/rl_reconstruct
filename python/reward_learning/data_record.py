@@ -1,13 +1,54 @@
 from __future__ import print_function
 
-from collections import namedtuple
 import threading
 import multiprocessing
-import Queue
+from collections import namedtuple
+import os
+try:
+    from queue import Queue, Full, Empty
+except ImportError:
+    from Queue import Queue, Full, Empty
+try:
+    import cPickle as pickle
+except ImportError:
+    import pickle
 import numpy as np
 import h5py
 import tensorflow as tf
-from RLrecon import math_utils
+from pybh import math_utils, hdf5_utils
+
+
+def write_samples_to_hdf5_file(filename, samples, attr_dict=None, **dataset_kwargs):
+    stacked_samples = {}
+    for key in samples[0]:
+        stacked_samples[key] = np.empty((len(samples),) + samples[0][key].shape, dtype=samples[0][key].dtype)
+    for key in samples[0]:
+        for i, sample in enumerate(samples):
+            stacked_samples[key][i, ...] = sample[key]
+    hdf5_utils.write_numpy_dict_to_hdf5_file(filename, stacked_samples, attr_dict=attr_dict,
+                                             **dataset_kwargs)
+
+
+def read_samples_from_hdf5_file(filename, field_dict=None, read_attributes=True):
+    result = hdf5_utils.read_hdf5_file_to_numpy_dict(filename, field_dict, read_attributes)
+    if read_attributes:
+        data, attr_dict = result
+    else:
+        data = result
+    key_list = list(data.keys())
+    sample_dict = {}
+    for key in key_list:
+        assert(data[key].shape[0] == data[key_list[0]].shape[0])
+        sample_dict[key] = []
+        for i in range(data[key].shape[0]):
+            sample_dict[key].append(data[key][i, ...])
+    samples = []
+    for i in range(data[key_list[0]].shape[0]):
+        samples.append({key: sample_dict[key][i] for key in sample_dict})
+    if read_attributes:
+        return samples, attr_dict
+    else:
+        return samples
 
 
 Record = namedtuple("Record", ["obs_levels", "grid_3d", "rewards", "prob_rewards", "scores"])
@@ -27,32 +68,6 @@ RecordV4 = namedtuple("RecordV4", ["intrinsics", "map_resolution", "axis_mode", 
 RecordV4Batch = namedtuple("RecordV4Batch", ["intrinsics", "map_resolution", "axis_mode", "forward_factor",
                                              "obs_levels", "in_grid_3ds", "out_grid_3ds", "rewards", "scores",
                                              "rgb_images", "depth_images", "normal_images"])
-
-
-def write_hdf5_file(filename, numpy_dict):
-    f = h5py.File(filename, "w")
-    for key, array in numpy_dict.iteritems():
-        array = np.asarray(array)
-        if array.dtype == np.float32:
-            hdf5_dtype = 'f'
-        elif array.dtype == np.float64:
-            hdf5_dtype = 'd'
-        elif array.dtype == np.int:
-            hdf5_dtype = 'i'
-        else:
-            raise NotImplementedError("Unsupported datatype for write_hdf5_file() helper")
-        dataset = f.create_dataset(key, array.shape, dtype=hdf5_dtype)
-        dataset[...] = array
-    f.close()
-
-
-def read_hdf5_file_to_numpy_dict(filename):
-    f = h5py.File(filename, "r")
-    numpy_dict = {}
-    for key in f:
-        numpy_dict[key] = np.array(f[key])
-    f.close()
-    return numpy_dict
 
 
 def write_hdf5_records(filename, records):
@@ -92,7 +107,7 @@ def read_hdf5_records(filename):
         assert(scores.shape[0] == grid_3ds.shape[0])
         assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
         return RecordBatch(obs_levels, grid_3ds, rewards, prob_rewards, scores)
-    except Exception, err:
+    except Exception as err:
         print("ERROR: Exception raised when reading as HDF5 v1 file \"{}\": {}".format(filename, err))
 
 
@@ -150,15 +165,16 @@ def write_hdf5_records_v3(filename, records):
 
 
 def create_dataset_with_fixed_chunks(f, name, shape, dtype=None, **kwargs):
-    record_size = 4 * reduce(int.__mul__, shape[1:])
-    chunk_records = 1024 * 1024 / record_size
-    chunk_records = min(shape[0], chunk_records)
-    if chunk_records == 0:
-        chunk_records = 1
-    chunks = (chunk_records,) + shape[1:]
-    # print("chunks:", chunks)
-    maxshape = shape
-    return f.create_dataset(name, shape, dtype=dtype, chunks=chunks, maxshape=maxshape, **kwargs)
+    return f.create_dataset(name, shape, dtype=dtype, **kwargs)
+    # record_size = 4 * reduce(int.__mul__, shape[1:])
+    # chunk_records = 1024 * 1024 / record_size
+    # chunk_records = min(shape[0], chunk_records)
+    # if chunk_records == 0:
+    #     chunk_records = 1
+    # chunks = (chunk_records,) + shape[1:]
+    # # print("chunks:", chunks)
+    # maxshape = shape
+    # return f.create_dataset(name, shape, dtype=dtype, chunks=chunks, maxshape=maxshape, **kwargs)
 
 
 def write_hdf5_records_v4(filename, records, dataset_kwargs):
@@ -223,7 +239,7 @@ def read_hdf5_records_v2(filename):
         assert(scores.shape[0] == grid_3ds.shape[0])
         assert(grid_3ds.shape[-1] == len(obs_levels) * obs_channels)
         return RecordV2Batch(obs_levels, grid_3ds, rewards, norm_rewards, prob_rewards, norm_prob_rewards, scores)
-    except Exception, err:
+    except Exception as err:
         print("ERROR: Exception raised when reading as HDF5 v2 file \"{}\": {}".format(filename, err))
 
 
@@ -242,7 +258,7 @@ def read_hdf5_records_v3(filename):
         assert(rewards.shape[0] == in_grid_3ds.shape[0])
         assert(scores.shape[0] == in_grid_3ds.shape[0])
         return RecordV3Batch(obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores)
-    except Exception, err:
+    except Exception as err:
         print("ERROR: Exception raised when reading as HDF5 v3 file \"{}\": {}".format(filename, err))
         raise
 
@@ -274,14 +290,14 @@ def read_hdf5_records_v4(filename):
         return RecordV4Batch(intrinsics, map_resolution, axis_mode, forward_factor,
                              obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores,
                              rgb_images, depth_images, normal_images)
-    except Exception, err:
+    except Exception as err:
         print("ERROR: Exception raised when reading as HDF5 v4 file \"{}\": {}".format(filename, err))
         raise
 
 
 def generate_single_records_from_batch_v2(record_batch):
     obs_levels, grid_3ds, rewards, norm_rewards, prob_rewards, norm_prob_rewards, scores = record_batch
-    for i in xrange(rewards.shape[0]):
+    for i in range(rewards.shape[0]):
         obs_levels = np.array(obs_levels)
         single_rewards = rewards[i, ...]
         single_prob_rewards = prob_rewards[i, ...]
@@ -301,7 +317,7 @@ def generate_single_records_from_hdf5_file_v2(filename):
 
 def generate_single_records_from_batch_v3(record_batch):
     obs_levels, in_grid_3ds, out_grid_3ds, rewards, scores = record_batch
-    for i in xrange(rewards.shape[0]):
+    for i in range(rewards.shape[0]):
         obs_levels = np.array(obs_levels)
         in_grid_3d = in_grid_3ds[i, ...]
         out_grid_3d = out_grid_3ds[i, ...]
@@ -317,7 +333,7 @@ def generate_single_records_from_hdf5_file_v3(filename):
 
 
 def generate_single_records_from_batch_v4(record_batch):
-    for i in xrange(record_batch.rewards.shape[0]):
+    for i in range(record_batch.rewards.shape[0]):
         intrinsics = np.array(record_batch.intrinsics)
         map_resolution = np.array(record_batch.map_resolution)
         axis_mode = np.array(record_batch.axis_mode)
@@ -346,7 +362,7 @@ def generate_single_records_from_hdf5_file_v4(filename):
 def read_hdf5_records_as_list(filename):
     obs_levels, grid_3ds, rewards, prob_rewards, scores = read_hdf5_records(filename)
     records = []
-    for i in xrange(rewards.shape[0]):
+    for i in range(rewards.shape[0]):
         obs_levels = np.array(obs_levels)
         single_rewards = rewards[i, ...]
         single_prob_rewards = prob_rewards[i, ...]
@@ -390,235 +406,56 @@ def count_records_in_hdf5_file_v4(filename):
     return record_batch.in_grid_3ds.shape[0]
 
 
-class HDF5QueueReader(object):
-
-    def __init__(self, filename_dequeue_fn, enqueue_record_fn, coord, verbose=False):
-        self._filename_dequeue_fn = filename_dequeue_fn
-        self._enqueue_record_fn = enqueue_record_fn
-        self._coord = coord
-        self._thread = None
-        self._verbose = verbose
-
-    def _run(self):
-        record_count = 0
-        while not self._coord.should_stop():
-            filename = self._filename_dequeue_fn()
-            if filename is None:
-                continue
-            record_batch = read_hdf5_records_v2(filename)
-            for record in generate_single_records_from_batch_v2(record_batch):
-                enqueued = False
-                while not enqueued:
-                    enqueued = self._enqueue_record_fn(record)
-                    if self._coord.should_stop():
-                        break
-                if self._coord.should_stop():
-                    break
-                record_count += 1
-            if self._verbose:
-                print("Enqueued {} records.".format(record_count))
-        if self._verbose:
-            print("Stop request... Exiting HDF5 queue reader thread")
-
-    def start(self):
-        assert (self._thread is None)
-        self._thread = threading.Thread(target=self._run)
-        self._thread.start()
-
-    @property
-    def thread(self):
-        return self._thread
-
-
-HDF5_RECORD_VERSION_2 = 2
-HDF5_RECORD_VERSION_3 = 3
-HDF5_RECORD_VERSION_4 = 4
-HDF5_RECORD_VERSION_LATEST = HDF5_RECORD_VERSION_3
-
-
-class HDF5ReaderProcess(object):
-
-    def __init__(self, filename_queue, record_queue, hdf5_record_version=HDF5_RECORD_VERSION_LATEST, verbose=False):
-        self._filename_queue = filename_queue
-        self._record_queue = record_queue
-        if hdf5_record_version == HDF5_RECORD_VERSION_2:
-            self._record_generator_factory = generate_single_records_from_hdf5_file_v2
-        elif hdf5_record_version == HDF5_RECORD_VERSION_3:
-            self._record_generator_factory = generate_single_records_from_hdf5_file_v3
-        elif hdf5_record_version == HDF5_RECORD_VERSION_4:
-            self._record_generator_factory = generate_single_records_from_hdf5_file_v4
-        else:
-            raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
-        self._process = None
-        self._verbose = verbose
-        self._should_stop = True
-
-    def _run(self):
-        record_count = 0
-        while True:
-            filename = self._filename_queue.get(block=True)
-            if filename is None:
-                break
-            record_generator = self._record_generator_factory(filename)
-            for record in record_generator:
-                self._record_queue.put(record, block=True)
-                record_count += 1
-            if self._verbose:
-                print("Enqueued {} records.".format(record_count))
-        if self._verbose:
-            print("Stop request... Exiting HDF5 queue reader process")
-
-    def start(self):
-        assert (self._process is None)
-        self._should_stop = False
-        self._process = multiprocessing.Process(target=self._run)
-        self._process.start()
-
-    def is_alive(self):
-        if self._process is None:
-            return False
-        else:
-            return self._process.is_alive()
-
-    def join(self):
-        if self._process is not None:
-            self._process.join()
-
-    @property
-    def process(self):
-        return self._process
-
-
-class HDF5ReaderProcessCoordinator(object):
-
-    def __init__(self, filenames, coord, shuffle, hdf5_record_version=HDF5_RECORD_VERSION_LATEST,
-                 timeout=60, num_processes=1, record_queue_capacity=1024, verbose=False):
-        self._filenames = list(filenames)
-        self._coord = coord
-        self._shuffle = shuffle
-        self._hdf5_record_version = hdf5_record_version
-        self._timeout = timeout
-        self._num_processes = num_processes
-        self._record_queue_capacity = record_queue_capacity
-        self._verbose = verbose
-
-        self._thread = None
-
-        self._initialize_queue_and_readers()
-
-    def _initialize_queue_and_readers(self):
-        self._record_queue = multiprocessing.Queue(maxsize=self._record_queue_capacity)
-        self._filename_queue = multiprocessing.Queue(maxsize=2 * len(self._filenames))
-        self._reader_processes = [
-            HDF5ReaderProcess(self._filename_queue, self._record_queue, self._hdf5_record_version, self._verbose)
-            for _ in xrange(self._num_processes)]
-
-    def _start_readers(self):
-        for reader in self._reader_processes:
-            assert(not reader.is_alive())
-            reader.start()
-
-    def _stop_readers(self):
-        self._record_queue.close()
-        self._filename_queue.close()
-        self._record_queue.join_thread()
-        self._filename_queue.join_thread()
-        if self._verbose:
-            print("Terminating HDF5ReaderProcesses to stop")
-        for reader in self._reader_processes:
-            reader.process.terminate()
-        if self._verbose:
-            print("Resetting queue and HDF5ReaderProcesses")
-        self._initialize_queue_and_readers()
-
-    def _run(self):
-        while not self._coord.should_stop():
-            if self._shuffle:
-                np.random.shuffle(self._filenames)
-            for filename in self._filenames:
-                enqueued = False
-                while not enqueued:
-                    try:
-                        self._filename_queue.put(filename, block=True, timeout=self._timeout)
-                        enqueued = True
-                    except Queue.Full:
-                        pass
-                    if self._coord.should_stop():
-                        break
-                if self._coord.should_stop():
-                    break
-        # Terminate reader processes
-        self._stop_readers()
-        if self._verbose:
-            print("Stop request... Exiting HDF5ReaderProcessCoordinator queue thread")
-
-    def get_next_record(self):
-        while not self._coord.should_stop():
-            try:
-                return self._record_queue.get(block=True, timeout=self._timeout)
-            except Queue.Empty:
-                pass
-        if self._verbose:
-            print("Stop request... Exiting HDF5ReaderProcessCoordinator queue thread")
-        raise StopIteration()
-
-    def start(self):
-        assert (self._thread is None)
-        self._thread = threading.Thread(target=self._run)
-        self._thread.start()
-        self._start_readers()
-
-    def compute_num_records(self):
-        p = multiprocessing.Pool(self._num_processes)
-        # TODO: This blocks on Ctrl-C
-        try:
-            if self._hdf5_record_version == HDF5_RECORD_VERSION_2:
-                count_record_fn = count_records_in_hdf5_file_v2
-            elif self._hdf5_record_version == HDF5_RECORD_VERSION_3:
-                count_record_fn = count_records_in_hdf5_file_v3
-            elif self._hdf5_record_version == HDF5_RECORD_VERSION_4:
-                count_record_fn = count_records_in_hdf5_file_v4
-            else:
-                raise NotImplementedError("Unknown HDF5 record version: {}".format(self._hdf5_record_version))
-            record_counts_async = p.map_async(count_record_fn, self._filenames, chunksize=1)
-            # Workaround to enable KeyboardInterrupt (with p.map() or record_counts_async.get() it won't be received)
-            record_counts = record_counts_async.get(np.iinfo(np.int32).max)
-            record_count = np.sum(record_counts)
-            p.close()
-            p.join()
-        except Exception, exc:
-            print("Exception occured when computing num records: {}".format(exc))
-            p.close()
-            p.terminate()
-            raise
-        return record_count
-
-    @property
-    def thread(self):
-        return self._thread
-
-
-def compute_dataset_stats(batches_generator):
-    mean_and_vars = None
+def compute_dataset_stats_from_batches(batches_generator):
+    statistics = None
     for batches in batches_generator:
-        if mean_and_vars is None:
-            mean_and_vars = [math_utils.SinglePassMeanAndVariance(batch.shape[1:]) for batch in batches]
+        if statistics is None:
+            statistics = [math_utils.SinglePassStatistics(batch.shape[1:]) for batch in batches]
         for i, batch in enumerate(batches):
-            for j in xrange(batch.shape[0]):
-                mean_and_vars[i].add_value(batch[j, ...])
+            for j in range(batch.shape[0]):
+                statistics[i].add_value(batch[j, ...])
             assert(batch.shape[0] == batches[0].shape[0])
     means = []
     stddevs = []
-    for i in xrange(len(mean_and_vars)):
-        mean = mean_and_vars[i].mean
-        stddev = mean_and_vars[i].stddev
+    mins = []
+    maxs = []
+    for i in range(len(statistics)):
+        mean = statistics[i].mean
+        stddev = statistics[i].stddev
+        min_v = statistics[i].min
+        max_v = statistics[i].max
         stddev[np.abs(stddev) < 1e-4] = 1
         assert(np.all(np.isfinite(mean)))
         assert(np.all(np.isfinite(stddev)))
         means.append(mean)
         stddevs.append(stddev)
-    data_size = mean_and_vars[0].num_samples
-    return data_size, zip(means, stddevs)
+        mins.append(min_v)
+        maxs.append(max_v)
+    data_size = statistics[0].num_samples
+    return data_size, list(zip(means, stddevs, mins, maxs))
+
+
+def compute_dataset_stats_from_dicts(dict_generator, stddev_tolerance=1e-4):
+    statistics = None
+    for d in dict_generator:
+        if statistics is None:
+            statistics = {key: math_utils.SinglePassStatistics(sample.shape) for key, sample in d.items()}
+        for key, sample in d.items():
+            statistics[key].add_value(sample)
+    stats = {}
+    for key in d:
+        stats[key] = {}
+        mean = statistics[key].mean
+        stats[key]["mean"] = mean
+        stddev = statistics[key].stddev
+        stddev[np.abs(stddev) < stddev_tolerance] = 1
+        stats[key]["stddev"] = stddev
+        assert(np.all(np.isfinite(mean)))
+        assert(np.all(np.isfinite(stddev)))
+        stats[key]["min"] = statistics[key].min
+        stats[key]["max"] = statistics[key].max
+        stats[key]["num_samples"] = statistics[key].num_samples
+    return stats
 
 
 def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_scores=True):
@@ -632,32 +469,95 @@ def compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_s
                 batch = getattr(record_batch, name)
                 batches.append(batch)
             yield batches
-    data_size, stats = compute_dataset_stats(batches_generator(filenames, field_names))
+    data_size, stats = compute_dataset_stats_from_batches(batches_generator(filenames, field_names))
 
-    if compute_z_scores:
+    statistics_dict = {}
+    for i, field_name in enumerate(field_names):
+        statistics_dict[field_name] = {}
+        statistics_dict[field_name]["mean"] = stats[i][0]
+        statistics_dict[field_name]["stddev"] = stats[i][1]
+        statistics_dict[field_name]["min"] = stats[i][2]
+        statistics_dict[field_name]["max"] = stats[i][3]
+        statistics_dict[field_name]["num_samples"] = data_size
 
-        def z_score_batches_generator(filenames, field_names):
-            for filename in filenames:
-                batches = []
-                record_batch = read_hdf5_records_v3(filename)
-                for i, name in enumerate(field_names):
-                    batch = getattr(record_batch, name)
-                    mean = stats[i][0]
-                    stddev = stats[i][1]
-                    z_score = (batch - mean[np.newaxis, ...]) / stddev[np.newaxis, ...]
-                    batches.append(z_score)
-                yield batches
-        _, z_score_stats = compute_dataset_stats(z_score_batches_generator(filenames, field_names))
-        all_stats = []
-        for i in xrange(len(stats)):
-            all_stats.append(stats[i])
-            all_stats.append(z_score_stats[i])
-        stats = all_stats
-    return data_size, stats
+    if not compute_z_scores:
+        return statistics_dict
+
+    def z_score_batches_generator(filenames, field_names):
+        for filename in filenames:
+            batches = []
+            record_batch = read_hdf5_records_v3(filename)
+            for i, name in enumerate(field_names):
+                batch = getattr(record_batch, name)
+                mean = stats[i][0]
+                stddev = stats[i][1]
+                z_score = (batch - mean[np.newaxis, ...]) / stddev[np.newaxis, ...]
+                batches.append(z_score)
+            yield batches
+    z_score_data_size, z_score_stats = compute_dataset_stats_from_batches(z_score_batches_generator(filenames, field_names))
+    assert(data_size == z_score_data_size)
+
+    z_score_statistics_dict = {}
+    for i, field_name in enumerate(field_names):
+        z_score_statistics_dict[field_name] = {}
+        z_score_statistics_dict[field_name]["mean"] = z_score_stats[i][0]
+        z_score_statistics_dict[field_name]["stddev"] = z_score_stats[i][1]
+        z_score_statistics_dict[field_name]["min"] = z_score_stats[i][2]
+        z_score_statistics_dict[field_name]["max"] = z_score_stats[i][3]
+        z_score_statistics_dict[field_name]["num_samples"] = data_size
+
+    return statistics_dict, z_score_statistics_dict
 
 
 def compute_dataset_stats_from_hdf5_files_v4(filenames, field_names, compute_z_scores=True):
-    return compute_dataset_stats_from_hdf5_files_v3(filenames, field_names, compute_z_scores)
+    assert(len(filenames) > 0)
+
+    def batches_generator(filenames, field_names):
+        for filename in filenames:
+            batches = []
+            record_batch = read_hdf5_records_v4(filename)
+            for name in field_names:
+                batch = getattr(record_batch, name)
+                batches.append(batch)
+            yield batches
+    data_size, stats = compute_dataset_stats_from_batches(batches_generator(filenames, field_names))
+
+    statistics_dict = {}
+    for i, field_name in enumerate(field_names):
+        statistics_dict[field_name] = {}
+        statistics_dict[field_name]["mean"] = stats[i][0]
+        statistics_dict[field_name]["stddev"] = stats[i][1]
+        statistics_dict[field_name]["min"] = stats[i][2]
+        statistics_dict[field_name]["max"] = stats[i][3]
+        statistics_dict[field_name]["num_samples"] = data_size
+
+    if not compute_z_scores:
+        return statistics_dict
+
+    def z_score_batches_generator(filenames, field_names):
+        for filename in filenames:
+            batches = []
+            record_batch = read_hdf5_records_v4(filename)
+            for i, name in enumerate(field_names):
+                batch = getattr(record_batch, name)
+                mean = stats[i][0]
+                stddev = stats[i][1]
+                z_score = (batch - mean[np.newaxis, ...]) / stddev[np.newaxis, ...]
+                batches.append(z_score)
+            yield batches
+    z_score_data_size, z_score_stats = compute_dataset_stats_from_batches(z_score_batches_generator(filenames, field_names))
+    assert(data_size == z_score_data_size)
+
+    z_score_statistics_dict = {}
+    for i, field_name in enumerate(field_names):
+        z_score_statistics_dict[field_name] = {}
+        z_score_statistics_dict[field_name]["mean"] = z_score_stats[i][0]
+        z_score_statistics_dict[field_name]["stddev"] = z_score_stats[i][1]
+        z_score_statistics_dict[field_name]["min"] = z_score_stats[i][2]
+        z_score_statistics_dict[field_name]["max"] = z_score_stats[i][3]
+        z_score_statistics_dict[field_name]["num_samples"] = data_size
+
+    return statistics_dict, z_score_statistics_dict
 
 
 def _int64_feature(value):
@@ -733,7 +633,7 @@ def read_and_decode_tfrecords(filename_queue):
 
 
 def generate_tfrecords_from_batch(record_batch):
-    for i in xrange(record_batch.grid_3ds.shape[0]):
+    for i in range(record_batch.grid_3ds.shape[0]):
         int64_mapping = {
             'obs_levels': record_batch.obs_levels,
             'grid_3ds_shape': record_batch.grid_3ds.shape[1:],
@@ -750,13 +650,13 @@ def generate_tfrecords_from_batch(record_batch):
         }
         feature_dict = {}
         feature_dict.update({
-            name: _int64_array_feature(np.asarray(values).flatten()) for name, values in int64_mapping.iteritems()
+            name: _int64_array_feature(np.asarray(values).flatten()) for name, values in int64_mapping.items()
         })
         feature_dict.update({
-            name: _float32_array_feature(np.asarray(values).flatten()) for name, values in float32_mapping.iteritems()
+            name: _float32_array_feature(np.asarray(values).flatten()) for name, values in float32_mapping.items()
         })
         feature_dict.update({
-            name: _bytes_feature(array.tostring()) for name, array in bytes_mapping.iteritems()
+            name: _bytes_feature(array.tostring()) for name, array in bytes_mapping.items()
         })
         example = tf.train.Example(features=tf.train.Features(feature=feature_dict))
         yield example

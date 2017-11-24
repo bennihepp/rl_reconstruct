@@ -171,7 +171,6 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
     predicted_rewards = np.zeros((environment.action_space.n,))
     adjusted_rewards = np.zeros((environment.action_space.n,))
     visit_counts = np.zeros((environment.action_space.n,))
-    visit_weights = np.zeros((environment.action_space.n,))
     collision_flags = np.zeros((environment.action_space.n,))
 
     for action in range(environment.action_space.n):
@@ -207,13 +206,8 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
         if keep_depth and do_insert_depth_map_simulate_sanity_check:
             depth_images[action] = predicted_depth_image
         visit_count = float(visited_poses.get_visit_count(new_pose))
-        penalty = compute_pose_penalty(new_pose, environment, visited_poses)
-        adjusted_reward = predicted_reward
-        if adjusted_reward <= 0.5:
-            adjusted_reward = 0.5
-        visit_weight = 1 / penalty
-        # adjusted_reward *= visit_weight
-        adjusted_reward = adjusted_reward * np.exp(- 0.5 * penalty)
+        visit_weight = 1. / (visit_count + 1)
+        adjusted_reward = predicted_reward * visit_weight
         if not args.ignore_collision and environment.base.is_action_colliding(pose, action, verbose=True):
             logger.info(print_prefix + "  Action {} would collide".format(action))
             collision_flags[action] = 1
@@ -267,7 +261,6 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
         predicted_rewards[action] = predicted_reward
         adjusted_rewards[action] = adjusted_reward
         visit_counts[action] = visit_count
-        visit_weights[action] = visit_weight
 
     if do_2step_sanity_check:
         if plan_depth > 0:
@@ -276,7 +269,7 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
             i = np.argmax(tmp_rewards)
             local_future_rewards[0] = predicted_rewards[i]
 
-    return predicted_rewards, adjusted_rewards, visit_weights, collision_flags
+    return predicted_rewards, adjusted_rewards, visit_counts, collision_flags
 
 
 def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_depth, compute_reward_fn,
@@ -291,7 +284,6 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
     predicted_rewards = np.zeros((environment.action_space.n,))
     adjusted_rewards = np.zeros((environment.action_space.n,))
     visit_counts = np.zeros((environment.action_space.n,))
-    visit_weights = np.zeros((environment.action_space.n,))
     collision_flags = np.zeros((environment.action_space.n,))
     all_predicted_reward, _ = compute_reward_fn(pose, timer=time_meter)
 
@@ -304,13 +296,8 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
             logger.info("new pose within: ", new_pose)
         predicted_reward = all_predicted_reward[action]
         visit_count = float(visited_poses.get_visit_count(new_pose))
-        penalty = compute_pose_penalty(new_pose, environment, visited_poses)
-        adjusted_reward = predicted_reward
-        if adjusted_reward <= 0.5:
-            adjusted_reward = 0.5
-        adjusted_reward = predicted_reward * np.exp(- 0.5 * penalty)
-        visit_weight = 1 / penalty
-        # adjusted_reward *= visit_weight
+        visit_weight = 1. / (visit_count + 1)
+        adjusted_reward = predicted_reward * visit_weight
         if not args.ignore_collision and environment.base.is_action_colliding(pose, action, verbose=True):
             logger.info(print_prefix + "  Action {} would collide".format(action))
             collision_flags[action] = 1
@@ -322,41 +309,11 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
         predicted_rewards[action] = predicted_reward
         adjusted_rewards[action] = adjusted_reward
         visit_counts[action] = visit_count
-        visit_weights[action] = visit_weight
 
-    return predicted_rewards, adjusted_rewards, visit_weights, collision_flags
-
-
-def compute_pose_penalty(pose, environment, visited_poses):
-    # return 1.0
-
-    visit_count = float(visited_poses.get_visit_count(pose))
-    penalty = float(visit_count + 1)
-    assert penalty >= 1.0
-    return penalty
-
-    # p = environment.base.Pose(pose.location(), [0, 0, 0])
-    # k = 20
-    # quat_weight = 0.1
-    # indices_k, dist_sq_k = visited_poses.find_k_closest_poses(p, k, return_error=True, weights=[1, 1, 1, quat_weight, quat_weight, quat_weight, quat_weight])
-    # if len(indices_k) == 0:
-    #     penalty = 1
-    #     return penalty
-    # dist_k = np.sqrt(dist_sq_k)
-    # # print(indices_k)
-    # # print(dist_sq_k)
-    # # print(visited_poses.counts)
-    # counts_k = visited_poses.counts[indices_k]
-    # # counts_k = np.maximum(counts_k, 5)
-    # penalties_k = 0.5 * np.exp(-dist_k) * counts_k
-    # # visit_weight = 1 - np.exp(-np.sqrt(dist_sq)) / visit_count
-    # # visit_weight = 1.0 / np.sum(visit_counts_k)
-    # penalty = np.maximum(np.sum(penalties_k), 1.0)
-    # assert penalty >= 1.0
-    # return penalty
+    return predicted_rewards, adjusted_rewards, visit_counts, collision_flags
 
 
-def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
+def run_episode(args, episode, environment, compute_reward_fn, apply_depth_noise_fn, policy_mode,
                 reset_interval=np.iinfo(np.int32).max,
                 reset_score_threshold=np.finfo(np.float32).max,
                 downsample_to_grid=True,
@@ -412,6 +369,7 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
 
         current_pose = environment.base.get_pose()
         # environment.base.set_pose(current_pose, wait_until_set=True)
+        visited_poses.increase_visited_pose(current_pose)
 
         if i == 0:
             # Initialize output
@@ -441,7 +399,7 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
         print_prefix = ""
         keep_depth = True
         if do_2step_sanity_check:
-            predicted_rewards_1step, adjusted_rewards_1step, visit_weights_1step, collision_flags_1step = \
+            predicted_rewards_1step, adjusted_rewards_1step, visit_counts_1step, collision_flags_1step = \
                 compute_predicted_action_rewards(environment, visited_poses, current_pose, args.plan_steps - 2,
                                                  compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
@@ -452,14 +410,14 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
             reward_1step = predicted_rewards_1step[best_action_1step]
 
         if policy_mode == "action_prediction":
-            predicted_rewards, adjusted_rewards, visit_weights, collision_flags = \
+            predicted_rewards, adjusted_rewards, visit_counts, collision_flags = \
                 compute_predicted_action_rewards2(environment, visited_poses, current_pose, args.plan_steps - 1,
                                                   compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
                                                   local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
                                                   print_prefix, keep_depth, time_meter, verbose,
                                                   do_insert_depth_map_simulate_sanity_check, do_2step_sanity_check)
         else:
-            predicted_rewards, adjusted_rewards, visit_weights, collision_flags = \
+            predicted_rewards, adjusted_rewards, visit_counts, collision_flags = \
                 compute_predicted_action_rewards(environment, visited_poses, current_pose, args.plan_steps - 1,
                                                  compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
@@ -482,9 +440,6 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
                     logger.info("np.sum(np.abs(depth_image - depth_images[best_action])):", np.sum(np.abs(predicted_depth_image - depth_images[action])))
                     assert False
 
-        # This should happen after action evaluation (otherwise higher risk of cycles)
-        visited_poses.increase_visited_pose(current_pose)
-
         # predicted_rewards = np.zeros((environment.action_space.n,))
         # visit_counts = np.zeros((environment.action_space.n,))
         # collision_flags = np.zeros((environment.action_space.n,))
@@ -506,14 +461,11 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
         #     # fig = visualization.plot_grid(record.in_grid_3d[..., 6], record.in_grid_3d[..., 7], title_prefix="in_grid_3d", show=False, fig_offset=fig)
         #     visualization.show(stop=True)
 
-        logger.info("Action weights: {}".format(visit_weights))
-        logger.info("Collision flags: {}".format(collision_flags))
-
         logger.info("Predicted rewards: {}".format(predicted_rewards))
         # visit_counts = np.array(visit_counts, dtype=np.float32)
-        # if verbose:
-        #     visit_weights = 1. / (visit_counts + 1)
-        #     logger.info("Visit weights: {}".format(visit_weights))
+        if verbose:
+            visit_weights = 1. / (visit_counts + 1)
+            logger.info("Visit weights: {}".format(visit_weights))
         # adjusted_rewards = predicted_rewards * visit_weights
         # adjusted_rewards[collision_flags > 0] = - np.finfo(np.float32).max
         logger.info("Adjusted expected rewards: {}".format(adjusted_rewards))
@@ -565,11 +517,6 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
 
         # Select best action and perform it
 
-        # allowed_action_mask = collision_flags <= 0
-        # adjusted_rewards[allowed_action_mask] = np.maximum(adjusted_rewards[allowed_action_mask], 0.0)
-        # adjusted_rewards[np.logical_and(adjusted_rewards >= 0, adjusted_rewards < 1.0)] = 0.0
-        # adjusted_rewards[allowed_action_mask] += 1 - np.min(adjusted_rewards[allowed_action_mask])
-
         if best_action is None:
             # best_action = np.argmax(adjusted_rewards)
             max_adjusted_reward = np.max(adjusted_rewards)
@@ -580,24 +527,8 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
                 # If there is not a single best action, choose a random one among the best ones.
                 best_action = np.random.choice(actions)
 
-        # allowed_action_mask = adjusted_rewards >= 0.0
-        # num_allowed_actions = np.sum(allowed_action_mask)
-        # num_zero_reward_actions = np.sum(adjusted_rewards[allowed_action_mask] == 0)
-        # if num_zero_reward_actions >= 0.0:
-        #     if np.random.rand() < (num_zero_reward_actions / float(environment.action_space.n)):
-        #         logger.info("Choosing random action from allowed actions")
-        #         actions = np.arange(environment.action_space.n)[allowed_action_mask]
-        #         best_action = np.random.choice(actions)
-
-
         if best_action >= 0:
             assert collision_flags[best_action] <= 0
-
-        # if best_action == 5:
-        #     if np.random.rand() < 0.2:
-        #         print("Correcting forward action")
-        #         while len(actions) > 1 and best_action == 5:
-        #             best_action = np.random.choice(actions)
 
         if best_action >= 0:
             predicted_reward = predicted_rewards[best_action]
@@ -615,66 +546,12 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
         # best_action = 0
         with time_meter.measure("simulate_action"):
             new_pose = environment.base.simulate_action_on_pose(current_pose, best_action)
-
-
-
-
-        # import pydevd
-        # pydevd.settrace('localhost', port=1234, stdoutToServer=True, stderrToServer=True)
-
-        # from matplotlib import pyplot as plt
-        # import matplotlib
-        # matplotlib.use('GTkAgg')
-        # plt.ion()
-        # plt.gcf().clear()
-        # plt.show(block=False)
-        # X = np.linspace(-10, 10, 10) + new_pose.location()[0]
-        # Y = np.linspace(-10, 10, 10) + new_pose.location()[1]
-        # xv, yv = np.meshgrid(X, Y, indexing="ij")
-        # weights = np.zeros(xv.shape)
-        # for ix in range(len(X)):
-        #     for iy in range(len(Y)):
-        #         x = xv[ix, iy]
-        #         y = yv[ix, iy]
-        #         p = environment.base.Pose([x, y,  + new_pose.location()[2]], [0, 0, 0])
-        #         penalty = compute_pose_penalty(p, environment, visited_poses)
-        #         weights[ix, iy] = 1 / penalty
-        # plt.contour(xv, yv, weights, cmap=plt.cm.rainbow)
-        # for action in range(environment.action_space.n):
-        #     if environment.base.is_action_colliding(new_pose, action):
-        #         color_symbol = 'r'
-        #     else:
-        #         color_symbol = 'g'
-        #     sim_pose = environment.base.simulate_action_on_pose(new_pose, action)
-        #     yaw = sim_pose.orientation_rpy()[2]
-        #     plt.gca().arrow(sim_pose.location()[0], sim_pose.location()[1],
-        #                     0.3 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                     head_width=0.05, head_length=0.1, fc=color_symbol, ec=color_symbol)
-        # yaw = current_pose.orientation_rpy()[2]
-        # plt.gca().arrow(current_pose.location()[0], current_pose.location()[1],
-        #                 0.3 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                 head_width=0.05, head_length=0.1, fc='0.5', ec='0.5')
-        # yaw = new_pose.orientation_rpy()[2]
-        # plt.gca().arrow(new_pose.location()[0], new_pose.location()[1],
-        #                 0.5 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                 linewidth=0.02, head_width=0.1, head_length=0.2, fc='k', ec='k')
-        # # plt.draw()
-        # plt.gcf().canvas.draw()
-
-
-
-
         with time_meter.measure("set_pose"):
             environment.base.set_pose(new_pose, wait_until_set=True)
         with time_meter.measure("get_depth_image"):
             # environment.base.get_engine().get_depth_image()
             depth_image = environment.base.get_engine().get_depth_image()
-            # depth_image_copy = depth_image.copy()
-            # depth_image_copy[depth_image_copy > 20] = 20.0
-            # # depth_image_copy = np.minimum(depth_image_copy, 20)
-            # depth_image_copy = (255 * depth_image_copy / 20.).astype(np.uint8)
-            # import cv2
-            # cv2.imwrite("depth_image.png", depth_image_copy)
+            depth_image = apply_depth_noise_fn(depth_image)
 
         if perform_measurement:
             # sim_result = environment.base.get_mapper().perform_insert_depth_map_rpy(
@@ -823,6 +700,32 @@ def run(args):
     logger.info("raycast_max_range={}".format(raycast_max_range))
 
     environment.base.get_engine().disable_input()
+
+    depth_noise_mu = 0.0
+    # depth_noise_sigma = 0.05
+    depth_noise_sigma = 0.10
+    # depth_noise_sigma = 0.20
+    # depth_noise_sigma = 0.50
+    # depth_noise_drop_prob = 0.00
+    # depth_noise_drop_prob = 0.05
+    depth_noise_drop_prob = 0.10
+    # depth_noise_drop_prob = 0.25
+    depth_noise_sigma = args.depth_noise_sigma
+    depth_noise_drop_prob = args.depth_noise_drop_prob
+    collision_bbox_extent = environment.base.get_collision_bounding_box().max_extent()
+
+    def apply_depth_noise(depth_image, copy=False):
+        if copy:
+            depth_image = depth_image.copy()
+        # Add noise to depth image
+        depth_image += depth_noise_mu + depth_noise_sigma * np.random.randn(*depth_image.shape)
+        depth_image[depth_image <= collision_bbox_extent] = 0.0
+        if depth_noise_drop_prob > 0.0:
+            depth_image_drop_mask = np.random.rand(*depth_image.shape) < depth_noise_drop_prob
+            depth_image[depth_image_drop_mask] = -1.0
+            logger.info("Dropping {} out of {} pixels".format(np.sum(depth_image_drop_mask),
+                                                              depth_image.shape[0] * depth_image.shape[1]))
+        return depth_image
 
     # Load model if in prediction mode
     if args.policy_mode == "prediction" or args.policy_mode == "action_prediction":
@@ -1190,14 +1093,18 @@ def run(args):
     while args.num_episodes < 0 or episode < args.num_episodes:
         if args.output_filename_prefix:
             if args.plan_steps > 1:
-                output_filename_template = "{:s}_{:s}_{:d}step_{{:d}}.hdf5".format(
+                output_filename_template = "{:s}_{:s}_noise_{:.2f}_{:.2f}_{:d}step_{{:d}}.hdf5".format(
                     args.output_filename_prefix,
                     args.policy_mode,
+                    depth_noise_sigma,
+                    depth_noise_drop_prob,
                     args.plan_steps)
             else:
-                output_filename_template = "{:s}_{:s}_{{:d}}.hdf5".format(
+                output_filename_template = "{:s}_{:s}_noise_{:.2f}_{:.2f}_{{:d}}.hdf5".format(
                     args.output_filename_prefix,
-                    args.policy_mode)
+                    args.policy_mode,
+                    depth_noise_sigma,
+                    depth_noise_drop_prob)
             hdf5_filename, file_num = file_utils.get_next_filename(output_filename_template)
             if not args.dry_run:
                 file_num_arr[0] = file_num
@@ -1213,11 +1120,11 @@ def run(args):
         if plot is not None:
             plot.reset()
 
-        logger.info("Running episode #{} (file_num={:d}) out of {} with policy {}".format(episode, file_num, args.num_episodes, args.policy_mode))
+        logger.info("Running episode #{} out of {} with policy {}".format(episode, args.num_episodes, args.policy_mode))
         if reset_hook is not None:
             reset_hook()
 
-        output = run_episode(args, episode, environment, compute_reward_fn, args.policy_mode,
+        output = run_episode(args, episode, environment, compute_reward_fn, apply_depth_noise, args.policy_mode,
                              args.reset_interval, args.reset_score_threshold,
                              downsample_to_grid=downsample_to_grid,
                              is_oracle=args.policy_mode == "oracle",
@@ -1292,6 +1199,8 @@ if __name__ == '__main__':
     parser.add_argument('--environment-config', type=str, required=True, help="Environment configuration file")
     parser.add_argument('--client-id', default=0, type=int)
     parser.add_argument('--prng-seed', type=int)
+    parser.add_argument('--depth-noise-sigma', type=float)
+    parser.add_argument('--depth-noise-drop-prob', type=float)
 
     # IO
     parser.add_argument('--io.timeout', type=int, default=10 * 60)

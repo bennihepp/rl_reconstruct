@@ -1,12 +1,12 @@
 from __future__ import print_function
 
 import threading
-import Queue
 import tensorflow as tf
 import tensorflow.contrib.staging as tf_staging
-import tf_utils
+from pybh import thread_utils
 
 
+# TODO: Remove or move to support libraries
 class QueueBridge(object):
     def __init__(self, coord, dequeue_fn, enqueue_fn, transform_fn=None, verbose=False):
         self._dequeue_fn = dequeue_fn
@@ -21,8 +21,12 @@ class QueueBridge(object):
 
     def _run(self):
         while not self._coord.should_stop():
-            entry = self._dequeue_fn()
-            if entry is None:
+            try:
+                entry = self._dequeue_fn()
+            except StopIteration:
+                print("Input queue closed.")
+                break
+            if entry == hdf5_utils.QUEUE_END:
                 continue
             transformed_entry = self._transform_fn(entry)
             self._enqueue_fn(transformed_entry)
@@ -31,7 +35,8 @@ class QueueBridge(object):
 
     def start(self):
         assert (self._thread is None)
-        self._thread = threading.Thread(target=self._run)
+        self._thread = threading.Thread(target=self._run, name="QueueBridge")
+        self._thread.daemon = True
         self._thread.start()
 
     @property
@@ -39,13 +44,14 @@ class QueueBridge(object):
         return self._thread
 
 
+# TODO: Remove or move to support libraries
 class TFInputPipeline(object):
 
     def __init__(self, tensor_provider_fn, sess, coord, batch_size,
                  tensor_shapes, tensor_dtypes,
                  queue_capacity, min_after_dequeue,
                  shuffle, num_threads,
-                 gpu_device_name=tf_utils.gpu_device_name(),
+                 provides_batches=False,
                  timeout=60, name=None, verbose=False):
         with tf.device("/cpu:0"):
             # Create python-TF data bridge
@@ -61,20 +67,44 @@ class TFInputPipeline(object):
                 name=name,
                 verbose=verbose)
 
+            if provides_batches:
+                enqueue_fn = self._data_bridge.enqueue_batch
+            else:
+                enqueue_fn = self._data_bridge.enqueue
             # We need an extra thread that dequeues from the multiprocessing queue
             # and enqueues on the threading queue
             self._queue_bridges = [QueueBridge(
                 coord,
                 tensor_provider_fn,
-                self._data_bridge.enqueue,
-                verbose=verbose) for _ in xrange(num_threads)]
+                enqueue_fn,
+                verbose=verbose) for _ in range(num_threads)]
+
+            self._tensor_provider_fn = tensor_provider_fn
+            self._enqueue_fn = enqueue_fn
 
             # Retrieve tensors from data bridge
-            self._tensors = self._data_bridge.deque_batch()
+            self._tensors_batch = self._data_bridge.deque_batch()
+            self._tensors = self._data_bridge.deque()
 
     def start(self):
         for bridge in self._queue_bridges:
             bridge.start()
+
+    @property
+    def tensor_provider_fn(self):
+        return self._tensor_provider_fn
+
+    @property
+    def enqueue_fn(self):
+        return self._enqueue_fn
+
+    @property
+    def data_bridge(self):
+        return self._data_bridge
+
+    @property
+    def tensors_batch(self):
+        return self._tensors_batch
 
     @property
     def tensors(self):
@@ -85,57 +115,87 @@ class TFInputPipeline(object):
         return [bridge.thread for bridge in self._queue_bridges]
 
 
+# TODO: Move to support libraries
+class TFBatchFeeder(object):
+
+    def __init__(self, sess, coord, put_ops, group_size, perform_num_ops_on_start=-1):
+        self._sess = sess
+        self._put_ops = put_ops
+        self._group_size = group_size
+        if perform_num_ops_on_start >= 0:
+            self._perform_num_ops_on_start = perform_num_ops_on_start
+        else:
+            self._perform_num_ops_on_start = 2 * group_size
+        self._num_consumption = 0
+        self._thread = thread_utils.CoordinatedThread(coord, target=self._run, name="TFBatchFeeder")
+        self._thread.daemon = True
+        self._barrier = threading.Barrier(2)
+
+    def _run(self):
+        try:
+            if self._perform_num_ops_on_start > 0:
+                for _ in range(self._perform_num_ops_on_start):
+                    self._sess.run(self._put_ops)
+            while not self._thread.stopped():
+                try:
+                    self._barrier.wait()
+                    for _ in range(self._group_size):
+                        self._sess.run(self._put_ops)
+                except threading.BrokenBarrierError as exc:
+                    if not self._thread.stopped():
+                        raise
+        finally:
+            self._barrier.abort()
+
+    def start(self):
+        self._thread.start()
+
+    def abort(self):
+        self._barrier.abort()
+
+    def notify_batch_consumption(self):
+        self._num_consumption += 1
+        if self._num_consumption % self._group_size == 0:
+            self._barrier.wait()
+
+    @property
+    def thread(self):
+        return self._thread
+
+
+# TODO: Move to support libraries
 class TFStagingArea(object):
 
-    def __init__(self, tensors, device_name=None):
-        if device_name is None:
-            self._staging_area = self._create_staging_area(tensors)
-        else:
-            with tf.device(device_name):
-                self._staging_area = self._create_staging_area(tensors)
-        self._preload_op = self._staging_area.put(tensors)
-        self._tensors = self._staging_area.get()
-
-    def _create_staging_area(self, tensors):
+    @staticmethod
+    def _create_staging_area_from_tensors(tensors):
         return tf_staging.StagingArea(
             dtypes=[tensor.dtype for tensor in tensors],
             shapes=[tensor.shape for tensor in tensors])
 
+    def __init__(self, tensors, device_name=None):
+        if device_name is None:
+            self._staging_area = self._create_staging_area_from_tensors(tensors)
+        else:
+            with tf.device(device_name):
+                self._staging_area = self._create_staging_area_from_tensors(tensors)
+        self._put_op = self._staging_area.put(tensors)
+        self._tensors = self._staging_area.get()
+        self._size = self._staging_area.size()
+
     @property
-    def preload_op(self):
-        return self._preload_op
+    def put_op(self):
+        return self._put_op
 
     @property
     def tensors(self):
         return self._tensors
 
-
-class TFGpuInputPipeline(TFInputPipeline):
-
-    def _gpu_preload_pipeline(self, tensors, gpu_device_name="/gpu:0"):
-        with tf.device(gpu_device_name):
-            gpu_staging_area = tf_staging.StagingArea(
-                dtypes=[tensor.dtype for tensor in tensors],
-                shapes=[tensor.shape for tensor in tensors])
-        gpu_preload_op = gpu_staging_area.put(tensors)
-        gpu_tensors = gpu_staging_area.get()
-        return gpu_preload_op, gpu_tensors
-
-    def __init__(self, *args, **kwargs):
-        gpu_device_name = kwargs.get("gpu_device_name", tf_utils.gpu_device_name())
-        if "gpu_device_name" in kwargs:
-            del kwargs["gpu_device_name"]
-        super(TFGpuInputPipeline, self).__init__(*args, **kwargs)
-
-        # Generate GPU preload operations
-        self._gpu_preload_op, self._tensors = \
-            self._gpu_preload_pipeline(self._tensors, gpu_device_name)
-
     @property
-    def gpu_preload_op(self):
-        return self._gpu_preload_op
+    def size(self):
+        return self._size
 
 
+# TODO: Remove or move to support libraries
 class FilenameQueueProvider(object):
     def __init__(self, filenames, coord, shuffle, timeout=60, verbose=False):
         self._coord = coord
@@ -189,6 +249,7 @@ class FilenameQueueProvider(object):
         return self._thread
 
 
+# TODO: Remove or move to support libraries
 class TFDataBridge(object):
 
     def __init__(self,
@@ -215,11 +276,11 @@ class TFDataBridge(object):
         self._tensors = [
             tf.placeholder(dtype=dtypes[i],
                            shape=shapes[i],
-                           name="{}_tensor_{}".format(name, i)) for i in xrange(len(dtypes))]
+                           name="{}_tensor_{}".format(name, i)) for i in range(len(dtypes))]
         self._tensors_batch = [
             tf.placeholder(dtype=dtypes[i],
-                           shape=[batch_size] + list(shapes[i]),
-                           name="{}_tensor_batch_{}".format(name, i)) for i in xrange(len(dtypes))]
+                           shape=[None] + list(shapes[i]),
+                           name="{}_tensor_batch_{}".format(name, i)) for i in range(len(dtypes))]
 
         if self._verbose:
             print("Creating queue with capacity {}: {}".format(queue_capacity, self._name))
@@ -243,12 +304,16 @@ class TFDataBridge(object):
         self._enqueue_options = tf.RunOptions(timeout_in_ms=timeout * 1000)
         self._enqueue_counter = 0
 
+    @property
+    def queue(self):
+        return self._queue
+
     def enqueue(self, tensors):
         assert(len(tensors) == len(self._tensors))
         try:
             self._sess.run([self._enqueue_op],
                            feed_dict={
-                               self._tensors[i]: tensors[i] for i in xrange(len(self._tensors))},
+                               self._tensors[i]: tensors[i] for i in range(len(self._tensors))},
                            options=self._enqueue_options)
             if self._verbose:
                 self._enqueue_counter += 1
@@ -259,11 +324,12 @@ class TFDataBridge(object):
             return False
 
     def enqueue_batch(self, tensors):
-        for tensor in tensors:
-            assert(tensor.shape[0] == self._batch_size)
+        # for tensor in tensors:
+        #     assert(tensor.shape[0] == self._batch_size)
         try:
             self._sess.run(self._enqueue_batch_op,
-                           feed_dict={self._tensors: tensors},
+                           feed_dict={
+                               self._tensors_batch[i]: tensors[i] for i in range(len(self._tensors))},
                            options=self._enqueue_options)
             return True
         except tf.errors.DeadlineExceededError:

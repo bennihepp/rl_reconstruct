@@ -165,9 +165,7 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
                                      intrinsics, downsample_to_grid,
                                      print_prefix="", keep_depth=False,
                                      time_meter=DummyTimeMeter(),
-                                     verbose=False,
-                                     do_insert_depth_map_simulate_sanity_check=False,
-                                     do_2step_sanity_check=False):
+                                     verbose=False):
     predicted_rewards = np.zeros((environment.action_space.n,))
     adjusted_rewards = np.zeros((environment.action_space.n,))
     visit_counts = np.zeros((environment.action_space.n,))
@@ -182,38 +180,10 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
             new_pose = environment.base.simulate_action_on_pose(pose, action)
         logger.info("new pose within: {}".format(new_pose))
         predicted_reward, predicted_depth_image = compute_reward_fn(new_pose, timer=time_meter)
-        if do_insert_depth_map_simulate_sanity_check:
-            predicted_reward2, predicted_depth_image2 = compute_reward_fn(new_pose)
-            if predicted_reward != predicted_reward2:
-                for i in range(25):
-                    predicted_reward3, predicted_depth_image3 = compute_reward_fn(new_pose)
-                    if predicted_reward != predicted_reward2:
-                        logger.info("predicted_reward3:", predicted_reward3)
-                        logger.info("img_diff:", np.sum(np.abs(predicted_depth_image - predicted_depth_image3)))
-                logger.info("predicted_reward:", predicted_reward)
-                logger.info("predicted_reward2:", predicted_reward2)
-                logger.info("img_diff:", np.sum(np.abs(predicted_depth_image - predicted_depth_image2)))
-                import cv2
-                predicted_depth_image[predicted_depth_image > 20] = 20.
-                predicted_depth_image /= 20
-                predicted_depth_image2[predicted_depth_image2 > 20] = 20.
-                predicted_depth_image2 /= 20
-                cv2.imwrite("depth1.png", predicted_depth_image * 255)
-                cv2.imwrite("depth2.png", predicted_depth_image2 * 255)
-                cv2.imshow("depth1", predicted_depth_image)
-                cv2.imshow("depth2", predicted_depth_image2)
-                cv2.waitKey()
-                assert predicted_reward == predicted_reward2
-        if keep_depth and do_insert_depth_map_simulate_sanity_check:
-            depth_images[action] = predicted_depth_image
         visit_count = float(visited_poses.get_visit_count(new_pose))
         penalty = compute_pose_penalty(new_pose, environment, visited_poses)
-        adjusted_reward = predicted_reward
-        if adjusted_reward <= 0.5:
-            adjusted_reward = 0.5
         visit_weight = 1 / penalty
-        # adjusted_reward *= visit_weight
-        adjusted_reward = adjusted_reward * np.exp(- 0.5 * penalty)
+        adjusted_reward = predicted_reward * visit_weight
         if not args.ignore_collision and environment.base.is_action_colliding(pose, action, verbose=True):
             logger.info(print_prefix + "  Action {} would collide".format(action))
             collision_flags[action] = 1
@@ -234,28 +204,14 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
                         predicted_depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=False)
             else:
                 logger.info("WARNING: Doing multistep planning without depth map prediction")
-            if is_oracle and do_insert_depth_map_simulate_sanity_check:
-                if result.probabilistic_reward != predicted_reward:
-                    logger.info(print_prefix + "result.probabilistic_reward:", result.probabilistic_reward)
-                    logger.info(print_prefix + "predicted_reward:", predicted_reward)
-                assert result.probabilistic_reward == predicted_reward
             logger.info("new pose before: ", new_pose)
             next_step_predicted_rewards, next_step_adjusted_rewards, \
             next_step_visit_counts, next_step_collision_flags = \
                 compute_predicted_action_rewards(environment, visited_poses, new_pose, plan_depth - 1,
                                                  compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
-                                                 print_prefix + "    ", keep_depth, time_meter, verbose,
-                                                 do_insert_depth_map_simulate_sanity_check, do_2step_sanity_check)
+                                                 print_prefix + "    ", keep_depth, time_meter, verbose)
             logger.info("new pose after: ", new_pose)
-
-            if do_2step_sanity_check:
-                next_step_tmp_rewards = np.array(next_step_adjusted_rewards)
-                next_step_tmp_rewards[next_step_collision_flags > 0] = -np.inf
-                i = np.argmax(next_step_tmp_rewards)
-                logger.info(print_prefix + "Next best action for action {} is {}".format(action, i))
-                tmp_rewards_list[action] = next_step_predicted_rewards[i]
-                tmp_actions_list[action] = i
 
             adjusted_reward += np.max(next_step_adjusted_rewards)
             if predicted_depth_image is not None:
@@ -269,13 +225,6 @@ def compute_predicted_action_rewards(environment, visited_poses, pose, plan_dept
         visit_counts[action] = visit_count
         visit_weights[action] = visit_weight
 
-    if do_2step_sanity_check:
-        if plan_depth > 0:
-            tmp_rewards = np.array(adjusted_rewards)
-            tmp_rewards[collision_flags > 0] = -np.inf
-            i = np.argmax(tmp_rewards)
-            local_future_rewards[0] = predicted_rewards[i]
-
     return predicted_rewards, adjusted_rewards, visit_weights, collision_flags
 
 
@@ -285,9 +234,7 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
                                      intrinsics, downsample_to_grid,
                                      print_prefix="", keep_depth=False,
                                      time_meter=DummyTimeMeter(),
-                                     verbose=False,
-                                     do_insert_depth_map_simulate_sanity_check=False,
-                                     do_2step_sanity_check=False):
+                                     verbose=False):
     predicted_rewards = np.zeros((environment.action_space.n,))
     adjusted_rewards = np.zeros((environment.action_space.n,))
     visit_counts = np.zeros((environment.action_space.n,))
@@ -305,12 +252,8 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
         predicted_reward = all_predicted_reward[action]
         visit_count = float(visited_poses.get_visit_count(new_pose))
         penalty = compute_pose_penalty(new_pose, environment, visited_poses)
-        adjusted_reward = predicted_reward
-        if adjusted_reward <= 0.5:
-            adjusted_reward = 0.5
-        adjusted_reward = predicted_reward * np.exp(- 0.5 * penalty)
         visit_weight = 1 / penalty
-        # adjusted_reward *= visit_weight
+        adjusted_reward = predicted_reward * visit_weight
         if not args.ignore_collision and environment.base.is_action_colliding(pose, action, verbose=True):
             logger.info(print_prefix + "  Action {} would collide".format(action))
             collision_flags[action] = 1
@@ -328,8 +271,6 @@ def compute_predicted_action_rewards2(environment, visited_poses, pose, plan_dep
 
 
 def compute_pose_penalty(pose, environment, visited_poses):
-    # return 1.0
-
     visit_count = float(visited_poses.get_visit_count(pose))
     penalty = float(visit_count + 1)
     assert penalty >= 1.0
@@ -356,7 +297,7 @@ def compute_pose_penalty(pose, environment, visited_poses):
     # return penalty
 
 
-def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
+def run_episode(args, episode, environment, compute_reward_fn, compute_oracle_fn, policy_mode,
                 reset_interval=np.iinfo(np.int32).max,
                 reset_score_threshold=np.finfo(np.float32).max,
                 downsample_to_grid=True,
@@ -386,18 +327,9 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
         "computed_reward": [],
         "true_reward": [],
         "pose": [],
+        "match_count": 0,
+        "non_match_count": 0,
     }
-
-    do_insert_depth_map_simulate_sanity_check = False
-    do_2step_sanity_check = False
-
-    if args.plan_steps == 1:
-        do_2step_sanity_check = False
-
-    if do_2step_sanity_check:
-        assert args.plan_steps == 2
-        future_rewards = [0]
-        future_actions = [0]
 
     i = 0
     while True:
@@ -423,99 +355,41 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
 
         logger.info("Step # {} of episode $ {} with policy {} and plan depth {}".format(i, episode, args.policy_mode, args.plan_steps))
 
-        if do_insert_depth_map_simulate_sanity_check:
-            depth_images = [None for _ in range(environment.action_space.n)]
-        else:
-            depth_images = None
+        depth_images = None
 
-        if do_2step_sanity_check:
-            logger.info("WARNING: Doing 2step sanity checks. This causes a lot of overhead.")
-            tmp_rewards_list = [-np.inf for _ in range(environment.action_space.n)]
-            tmp_actions_list = [0 for _ in range(environment.action_space.n)]
-            local_future_rewards = [np.nan]
-        else:
-            tmp_rewards_list = None
-            tmp_actions_list = None
-            local_future_rewards = None
+        tmp_rewards_list = None
+        tmp_actions_list = None
+        local_future_rewards = None
 
         print_prefix = ""
         keep_depth = True
-        if do_2step_sanity_check:
-            predicted_rewards_1step, adjusted_rewards_1step, visit_weights_1step, collision_flags_1step = \
-                compute_predicted_action_rewards(environment, visited_poses, current_pose, args.plan_steps - 2,
-                                                 compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
-                                                 local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
-                                                 print_prefix, keep_depth, time_meter, verbose,
-                                                 do_insert_depth_map_simulate_sanity_check, do_2step_sanity_check)
-            depth_images_1step = depth_images
-            best_action_1step = np.argmax(adjusted_rewards_1step)
-            reward_1step = predicted_rewards_1step[best_action_1step]
 
-        if policy_mode == "action_prediction":
-            predicted_rewards, adjusted_rewards, visit_weights, collision_flags = \
-                compute_predicted_action_rewards2(environment, visited_poses, current_pose, args.plan_steps - 1,
-                                                  compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
-                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
-                                                  print_prefix, keep_depth, time_meter, verbose,
-                                                  do_insert_depth_map_simulate_sanity_check, do_2step_sanity_check)
-        else:
-            predicted_rewards, adjusted_rewards, visit_weights, collision_flags = \
+        predicted_rewards, adjusted_rewards, visit_weights, collision_flags = \
                 compute_predicted_action_rewards(environment, visited_poses, current_pose, args.plan_steps - 1,
                                                  compute_reward_fn, tmp_rewards_list, tmp_actions_list, depth_images,
                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
-                                                 print_prefix, keep_depth, time_meter, verbose,
-                                                 do_insert_depth_map_simulate_sanity_check, do_2step_sanity_check)
+                                                 print_prefix, keep_depth, time_meter, verbose)
 
-        if do_2step_sanity_check and do_insert_depth_map_simulate_sanity_check:
-            for action in range(environment.action_space.n):
-                if predicted_rewards[action] != predicted_rewards_1step[action]:
-                    logger.info("action:", action)
-                    logger.info("predicted_rewards[action]:", predicted_rewards[action])
-                    logger.info("predicted_rewards_1step[action]:", predicted_rewards_1step[action])
-                    new_pose = environment.base.simulate_action_on_pose(current_pose, action)
-                    predicted_reward, predicted_depth_image = compute_reward_fn(new_pose)
-                    logger.info("predicted_reward:", predicted_reward)
-                    new_pose = environment.base.simulate_action_on_pose(current_pose, action)
-                    predicted_reward, predicted_depth_image = compute_reward_fn(new_pose)
-                    logger.info("predicted_reward2:", predicted_reward)
-                    logger.info("np.sum(np.abs(depth_image - depth_images_1step[best_action])):", np.sum(np.abs(predicted_depth_image - depth_images_1step[action])))
-                    logger.info("np.sum(np.abs(depth_image - depth_images[best_action])):", np.sum(np.abs(predicted_depth_image - depth_images[action])))
-                    assert False
+        if policy_mode == "action_prediction":
+            predicted_rewards2, adjusted_rewards2, visit_weights2, collision_flags2 = \
+                compute_predicted_action_rewards2(environment, visited_poses, current_pose, args.plan_steps - 1,
+                                                  compute_oracle_fn, tmp_rewards_list, tmp_actions_list, depth_images,
+                                                  local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
+                                                  print_prefix, keep_depth, time_meter, verbose)
+        else:
+            predicted_rewards2, adjusted_rewards2, visit_weights2, collision_flags2 = \
+                compute_predicted_action_rewards(environment, visited_poses, current_pose, args.plan_steps - 1,
+                                                 compute_oracle_fn, tmp_rewards_list, tmp_actions_list, depth_images,
+                                                 local_future_rewards, is_oracle, intrinsics, downsample_to_grid,
+                                                 print_prefix, keep_depth, time_meter, verbose)
 
         # This should happen after action evaluation (otherwise higher risk of cycles)
         visited_poses.increase_visited_pose(current_pose)
-
-        # predicted_rewards = np.zeros((environment.action_space.n,))
-        # visit_counts = np.zeros((environment.action_space.n,))
-        # collision_flags = np.zeros((environment.action_space.n,))
-        # for action in range(environment.action_space.n):
-        #     if verbose:
-        #         logger.info(print_prefix + "Evaluating action {}".format(action))
-        #     if environment.base.is_action_colliding(current_pose, action, verbose=True):
-        #         logger.info(print_prefix + "Action {} would collide".format(action))
-        #         collision_flags[action] = 1
-        #     new_pose = environment.base.simulate_action_on_pose(current_pose, action)
-        #     predicted_reward, _ = compute_reward_fn(new_pose)
-        #     predicted_rewards[action] = predicted_reward
-        #     visit_count = visited_poses.get_visit_count(new_pose)
-        #     visit_counts[action] = visit_count
-
-        # if visualize:
-        #     fig = 1
-        #     fig = visualization.plot_grid(input[..., 2], input[..., 3], title_prefix="input", show=False, fig_offset=fig)
-        #     # fig = visualization.plot_grid(record.in_grid_3d[..., 6], record.in_grid_3d[..., 7], title_prefix="in_grid_3d", show=False, fig_offset=fig)
-        #     visualization.show(stop=True)
 
         logger.info("Action weights: {}".format(visit_weights))
         logger.info("Collision flags: {}".format(collision_flags))
 
         logger.info("Predicted rewards: {}".format(predicted_rewards))
-        # visit_counts = np.array(visit_counts, dtype=np.float32)
-        # if verbose:
-        #     visit_weights = 1. / (visit_counts + 1)
-        #     logger.info("Visit weights: {}".format(visit_weights))
-        # adjusted_rewards = predicted_rewards * visit_weights
-        # adjusted_rewards[collision_flags > 0] = - np.finfo(np.float32).max
         logger.info("Adjusted expected rewards: {}".format(adjusted_rewards))
 
         if np.all(collision_flags > 0):
@@ -523,145 +397,42 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
             break
 
         perform_measurement = True
-        best_action = None
-        if args.interactive:
-            valid_action_ids = np.arange(collision_flags.shape[0])[collision_flags <= 0]
-            logger.info("Valid actions: {}".format(valid_action_ids))
-            valid_input = False
-            while not valid_input:
-                user_input = raw_input("Overwrite action? [{}-{}]. Or take measurement? [m] Or ignore? [i] ".format(0, environment.action_space.n))
-                if len(user_input) > 0:
-                    if user_input == "m":
-                        best_action = -1
-                        perform_measurement = True
-                        valid_input = True
-                    elif user_input == "i":
-                        valid_input = True
-                    elif user_input == "h":
-                        logger.info(environment.base.get_pose())
-                        best_action = -1
-                        logger.info(current_pose)
-                        logger.info("Computing reward at current pose.")
-                        current_predicted_reward, _ = compute_reward_fn(current_pose, timer=time_meter)
-                        logger.info("  reward={}".format(current_predicted_reward))
-                    elif user_input == "g":
-                        best_action = -1
-                        logger.info("Computing reward at current pose.")
-                        pose = environment.base.Pose([0, 0, 0], [0, 0, 0])
-                        current_predicted_reward, _ = compute_reward_fn(pose, timer=time_meter)
-                        logger.info("  reward={}".format(current_predicted_reward))
-                    else:
-                        try:
-                            best_action = int(user_input)
-                            if best_action < -1 or best_action >= environment.action_space.n \
-                                    or collision_flags[best_action] > 0:
-                                logger.info("Invalid action: {}".format(best_action))
-                                best_action = None
-                            else:
-                                valid_input = True
-                            perform_measurement = False
-                        except ValueError:
-                            pass
 
-        # Select best action and perform it
-
-        # allowed_action_mask = collision_flags <= 0
-        # adjusted_rewards[allowed_action_mask] = np.maximum(adjusted_rewards[allowed_action_mask], 0.0)
-        # adjusted_rewards[np.logical_and(adjusted_rewards >= 0, adjusted_rewards < 1.0)] = 0.0
-        # adjusted_rewards[allowed_action_mask] += 1 - np.min(adjusted_rewards[allowed_action_mask])
-
-        if best_action is None:
-            # best_action = np.argmax(adjusted_rewards)
-            max_adjusted_reward = np.max(adjusted_rewards)
-            actions = np.arange(environment.action_space.n)[adjusted_rewards == max_adjusted_reward]
-            if len(actions) == 1:
-                best_action = actions[0]
-            else:
-                # If there is not a single best action, choose a random one among the best ones.
-                best_action = np.random.choice(actions)
-
-        # allowed_action_mask = adjusted_rewards >= 0.0
-        # num_allowed_actions = np.sum(allowed_action_mask)
-        # num_zero_reward_actions = np.sum(adjusted_rewards[allowed_action_mask] == 0)
-        # if num_zero_reward_actions >= 0.0:
-        #     if np.random.rand() < (num_zero_reward_actions / float(environment.action_space.n)):
-        #         logger.info("Choosing random action from allowed actions")
-        #         actions = np.arange(environment.action_space.n)[allowed_action_mask]
-        #         best_action = np.random.choice(actions)
-
+        max_adjusted_reward = np.max(adjusted_rewards)
+        actions = np.arange(environment.action_space.n)[adjusted_rewards == max_adjusted_reward]
+        if len(actions) == 1:
+            best_action = actions[0]
+        else:
+            # If there is not a single best action, choose a random one among the best ones.
+            best_action = np.random.choice(actions)
 
         if best_action >= 0:
             assert collision_flags[best_action] <= 0
 
-        # if best_action == 5:
-        #     if np.random.rand() < 0.2:
-        #         print("Correcting forward action")
-        #         while len(actions) > 1 and best_action == 5:
-        #             best_action = np.random.choice(actions)
+        max_adjusted_reward2 = np.max(adjusted_rewards2)
+        actions2 = np.arange(environment.action_space.n)[adjusted_rewards2 == max_adjusted_reward2]
+        if len(actions2) == 1:
+            best_action2 = actions2[0]
+        else:
+            # If there is not a single best action, choose a random one among the best ones.
+            best_action2 = np.random.choice(actions2)
+
+        if best_action == best_action2:
+            output["match_count"] += 1
+        else:
+            output["non_match_count"] += 1
+        logger.info("Match vs non-match count: {} : {}".format(output["match_count"], output["non_match_count"]))
 
         if best_action >= 0:
             predicted_reward = predicted_rewards[best_action]
         else:
             predicted_reward = np.nan
 
-        if do_2step_sanity_check:
-            future_rewards.append(tmp_rewards_list[best_action])
-            future_actions.append(tmp_actions_list[best_action])
-            logger.info("Next best action {} will give reward {}".format(tmp_actions_list[best_action], tmp_rewards_list[best_action]))
-            logger.info("local_future_rewards:", local_future_rewards)
-
         if verbose:
             logger.info("Performing action {}".format(best_action))
         # best_action = 0
         with time_meter.measure("simulate_action"):
             new_pose = environment.base.simulate_action_on_pose(current_pose, best_action)
-
-
-
-
-        # import pydevd
-        # pydevd.settrace('localhost', port=1234, stdoutToServer=True, stderrToServer=True)
-
-        # from matplotlib import pyplot as plt
-        # import matplotlib
-        # matplotlib.use('GTkAgg')
-        # plt.ion()
-        # plt.gcf().clear()
-        # plt.show(block=False)
-        # X = np.linspace(-10, 10, 10) + new_pose.location()[0]
-        # Y = np.linspace(-10, 10, 10) + new_pose.location()[1]
-        # xv, yv = np.meshgrid(X, Y, indexing="ij")
-        # weights = np.zeros(xv.shape)
-        # for ix in range(len(X)):
-        #     for iy in range(len(Y)):
-        #         x = xv[ix, iy]
-        #         y = yv[ix, iy]
-        #         p = environment.base.Pose([x, y,  + new_pose.location()[2]], [0, 0, 0])
-        #         penalty = compute_pose_penalty(p, environment, visited_poses)
-        #         weights[ix, iy] = 1 / penalty
-        # plt.contour(xv, yv, weights, cmap=plt.cm.rainbow)
-        # for action in range(environment.action_space.n):
-        #     if environment.base.is_action_colliding(new_pose, action):
-        #         color_symbol = 'r'
-        #     else:
-        #         color_symbol = 'g'
-        #     sim_pose = environment.base.simulate_action_on_pose(new_pose, action)
-        #     yaw = sim_pose.orientation_rpy()[2]
-        #     plt.gca().arrow(sim_pose.location()[0], sim_pose.location()[1],
-        #                     0.3 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                     head_width=0.05, head_length=0.1, fc=color_symbol, ec=color_symbol)
-        # yaw = current_pose.orientation_rpy()[2]
-        # plt.gca().arrow(current_pose.location()[0], current_pose.location()[1],
-        #                 0.3 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                 head_width=0.05, head_length=0.1, fc='0.5', ec='0.5')
-        # yaw = new_pose.orientation_rpy()[2]
-        # plt.gca().arrow(new_pose.location()[0], new_pose.location()[1],
-        #                 0.5 * np.cos(yaw), 0.5 * np.sin(yaw),
-        #                 linewidth=0.02, head_width=0.1, head_length=0.2, fc='k', ec='k')
-        # # plt.draw()
-        # plt.gcf().canvas.draw()
-
-
 
 
         with time_meter.measure("set_pose"):
@@ -681,19 +452,9 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
             #     new_pose.location(), new_pose.orientation_rpy(),
             #     depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=True)
             with time_meter.measure("insert_depth_image"):
-                if do_insert_depth_map_simulate_sanity_check:
-                    logger.info("WARNING: Doing insert depth map simulation sanity check. This causes a lot of overhead.")
-                    simulated_result = environment.base.get_mapper().perform_insert_depth_map_rpy(
-                        new_pose.location(), new_pose.orientation_rpy(),
-                        depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=True)
                 result = environment.base.get_mapper().perform_insert_depth_map_rpy(
                     new_pose.location(), new_pose.orientation_rpy(),
                     depth_image, intrinsics, downsample_to_grid=downsample_to_grid, simulate=False)
-                if do_insert_depth_map_simulate_sanity_check:
-                    if simulated_result.probabilistic_reward != result.probabilistic_reward:
-                        logger.info("simulated_result.probabilistic_reward:", simulated_result.probabilistic_reward)
-                        logger.info("result.probabilistic_reward:", result.probabilistic_reward)
-                    assert simulated_result.probabilistic_reward == result.probabilistic_reward
 
             if measurement_hook is not None:
                 measurement_hook(new_pose, depth_image, intrinsics)
@@ -703,22 +464,6 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
             # Output expected and received reward
             score = result.normalized_probabilistic_score
             reward = result.probabilistic_reward
-            if do_insert_depth_map_simulate_sanity_check:
-                logger.info("np.sum(np.abs(depth_image - depth_images[best_action])):", np.sum(np.abs(depth_image - depth_images[best_action])))
-            if is_oracle and do_insert_depth_map_simulate_sanity_check:
-                if reward != predicted_reward:
-                    logger.info("reward:", reward)
-                    logger.info("predicted_reward:", predicted_reward)
-                    logger.info("np.sum(np.abs(depth_image - depth_images[best_action])):", np.sum(np.abs(depth_image - depth_images[best_action])))
-                    if do_insert_depth_map_simulate_sanity_check:
-                        import cv2
-                        depth_image[depth_image > 20.] = 20.
-                        depth_image /= 20
-                        depth_images[best_action][depth_images[best_action] > 20.] = 20.
-                        depth_images[best_action] /= 20
-                        cv2.imwrite("depth1.png", depth_image * 255)
-                        cv2.imwrite("depth2.png", depth_images[best_action] * 255)
-                assert reward == predicted_reward
             error = predicted_reward - reward
             logger.info("Selected action={}, expected reward={}, probabilistic reward={}, error={}, score={}".format(
                 best_action, predicted_reward, reward, error, score))
@@ -739,23 +484,6 @@ def run_episode(args, episode, environment, compute_reward_fn, policy_mode,
             # future_adjusted_rewards[best_action].append(local_future_adjusted_rewards[1])
             # future_visit_counts[best_action].append(local_future_visit_counts[1])
             # future_collision_flags[best_action].append(local_future_collision_flags[1])
-
-            if do_2step_sanity_check:
-                if local_future_rewards[0] != reward:
-                    logger.info("WARNING: Got different reward when performing measurement")
-                    logger.info("reward:", reward)
-                    logger.info("local_future_rewards[0]:", local_future_rewards[0])
-                    if i > 0: assert False
-                if future_actions[0] != best_action_1step or future_rewards[0] != reward_1step:
-                    logger.info("WARNING: Got different reward/action when performing measurement")
-                    logger.info("best_action_1step:", best_action_1step)
-                    logger.info("future_actions[0]:", future_actions[0])
-                    logger.info("reward_1step:", reward_1step)
-                    logger.info("future_rewards[0]:", future_rewards[1])
-                    if i > 0: assert False
-        if do_2step_sanity_check:
-            del future_rewards[0]
-            del future_actions[0]
 
         if visualize_images:
             logger.info("Showing RGB, normal and depth images")
@@ -1217,7 +945,7 @@ def run(args):
         if reset_hook is not None:
             reset_hook()
 
-        output = run_episode(args, episode, environment, compute_reward_fn, args.policy_mode,
+        output = run_episode(args, episode, environment, compute_reward_fn, compute_oracle_reward, args.policy_mode,
                              args.reset_interval, args.reset_score_threshold,
                              downsample_to_grid=downsample_to_grid,
                              is_oracle=args.policy_mode == "oracle",

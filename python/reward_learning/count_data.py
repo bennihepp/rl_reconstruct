@@ -3,8 +3,8 @@ from __future__ import print_function
 from __future__ import division
 
 import argparse
-import data_record
 import file_helpers
+from pybh import hdf5_utils
 
 
 def run(args):
@@ -13,19 +13,20 @@ def run(args):
         input_files = list(file_helpers.input_filename_generator_hdf5(input_path, file_helpers.DEFAULT_HDF5_PATTERN))
     else:
         input_list_file = args.input_list_file
-        with file(input_list_file, "r") as fin:
+        with open(input_list_file, "r") as fin:
             input_files = [l.strip() for l in fin.readlines()]
 
     print("Counting {} input files".format(len(input_files)))
 
-    # Count total number of records
-    total_num_records = 0
+    # Count total number of samples
+    total_num_samples = 0
     for i, input_file in enumerate(input_files):
-        print("Reading input file #{} out of {}".format(i, len(input_files)))
-        records = data_record.read_hdf5_records_v4_as_list(input_file)
-        total_num_records += len(records)
+        print("Reading input file #{} out of {} ({})".format(i, len(input_files), input_file))
+        field_dict = {"scores": False}
+        data, attr = hdf5_utils.read_hdf5_file_to_numpy_dict(input_file, field_dict, read_attributes=True)
+        total_num_samples += data["scores"].shape[0]
 
-    print("Total number of records: {}".format(total_num_records))
+    print("Total number of samples: {}".format(total_num_samples))
 
 
 if __name__ == '__main__':
