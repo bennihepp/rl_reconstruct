@@ -10,6 +10,7 @@
 #include <bh/math/geometry.h>
 #include <bh/mLib/mLibUtils.h>
 #include <bh/math/continuous_grid3d.h>
+#include <bh/mesh/triangle_mesh.h>
 
 using std::size_t;
 using std::cout;
@@ -22,13 +23,17 @@ using std::string;
 using FloatType = float;
 USE_FIXED_EIGEN_TYPES(FloatType);
 using BoundingBoxType = bh::BoundingBox3D<FloatType>;
+using TriangleType = bh::Triangle<FloatType>;
+using TriangleMeshType = bh::TriangleMesh<FloatType>;
+using TriangleMeshFactoryType = bh::TriangleMeshFactory<FloatType>;
 
 void run(const string& mesh_filename, const FloatType voxel_size,
          const boost::optional<string>& text_output_filename,
          const boost::optional<string>& binary_output_filename,
          const boost::optional<string>& mesh_output_filename,
          const BoundingBoxType& clip_bbox,
-         const FloatType max_squared_triangle_area) {
+         const FloatType max_squared_triangle_area,
+         const bool debug_output) {
 //  // Reading with PCL (quite picky on file format)
 //  PolygonMesh mesh;
 //  Eigen::Vector4f origin;
@@ -50,7 +55,7 @@ void run(const string& mesh_filename, const FloatType voxel_size,
   const bh::ContinuousGrid3DUtilsf grid_utils(voxel_size, 0.5f);
   std::unordered_set<Vector3, bh::EigenHash<Vector3>> intersecting_voxels;
 
-  std::stack<bh::Trianglef> triangle_stack;
+  std::stack<TriangleType> triangle_stack;
   for (size_t i = 0; i < mesh.m_FaceIndicesVertices.size(); ++i) {
     const ml::MeshDataf::Indices::Face& face = mesh.m_FaceIndicesVertices[i];
     BH_ASSERT_STR(face.size() == 3, "Can only handle triangle meshes");
@@ -58,22 +63,59 @@ void run(const string& mesh_filename, const FloatType voxel_size,
     const Vector3 v2 = bh::MLibUtilities::convertMlibToEigen(mesh.m_Vertices[face[1]]);
     const Vector3 v3 = bh::MLibUtilities::convertMlibToEigen(mesh.m_Vertices[face[2]]);
     if (clip_bbox.isOutside(v1) && clip_bbox.isOutside(v2) && clip_bbox.isOutside(v3)) {
-      continue;
+      const TriangleType tri(v1, v2, v3);
+      if (!tri.intersects(clip_bbox)) {
+        continue;
+      }
     }
-    const bh::Trianglef tri(v1, v2, v3);
+    const TriangleType tri(v1, v2, v3);
     triangle_stack.push(tri);
   }
-  std::vector<bh::Trianglef> triangles;
+
+  // For debugging
+  if (debug_output) {
+    BoundingBoxType mesh_bbox = BoundingBoxType::Empty();
+    for (size_t i = 0; i < mesh.m_FaceIndicesVertices.size(); ++i) {
+      const ml::MeshDataf::Indices::Face& face = mesh.m_FaceIndicesVertices[i];
+      BH_ASSERT_STR(face.size() == 3, "Can only handle triangle meshes");
+      const Vector3 v1 = bh::MLibUtilities::convertMlibToEigen(mesh.m_Vertices[face[0]]);
+      const Vector3 v2 = bh::MLibUtilities::convertMlibToEigen(mesh.m_Vertices[face[1]]);
+      const Vector3 v3 = bh::MLibUtilities::convertMlibToEigen(mesh.m_Vertices[face[2]]);
+      mesh_bbox.include(v1);
+      mesh_bbox.include(v2);
+      mesh_bbox.include(v2);
+    }
+    std::cout << "Mesh bounding box: " << mesh_bbox << std::endl;
+  }
+
+  // For debugging
+  if (debug_output) {
+    std::vector<TriangleType> triangles;
+    while (!triangle_stack.empty()) {
+      triangles.push_back(triangle_stack.top());
+      triangle_stack.pop();
+    }
+    TriangleMeshType tri_mesh = TriangleMeshFactoryType::createFromTriangles(triangles.begin(), triangles.end());
+    ml::MeshDataf tri_mesh_ml = bh::MLibUtilities::convertBhToMlib(tri_mesh);
+    ml::MeshIOf::saveToPLY("tmp_clip_mesh.ply", tri_mesh_ml);
+    for (const TriangleType& triangle : triangles) {
+      triangle_stack.push(triangle);
+    }
+  }
+  
+  std::cout << "Remaining triangles after clipping: " << triangle_stack.size() << std::endl;
+
+  std::vector<TriangleType> triangles;
   cout << "Splitting up triangles" << endl;
   size_t pushed_tri_count = triangle_stack.size();
   size_t processed_tri_count = 0;
   while (!triangle_stack.empty()) {
-    const bh::Trianglef tri = triangle_stack.top();
+    const TriangleType tri = triangle_stack.top();
     triangle_stack.pop();
     const float area_squared = tri.computeTriangleAreaSquare();
     if (area_squared > max_squared_triangle_area) {
-//      const std::array<bh::Trianglef, 2> split_tris = tri.splitTriangleInto2();
-      const std::array<bh::Trianglef, 3> split_tris = tri.splitTriangleInto3();
+//      const std::array<TriangleType, 2> split_tris = tri.splitTriangleInto2();
+      const std::array<TriangleType, 3> split_tris = tri.splitTriangleInto3();
       for (size_t i = 0; i < split_tris.size(); ++i) {
         triangle_stack.push(split_tris[i]);
       }
@@ -91,33 +133,69 @@ void run(const string& mesh_filename, const FloatType voxel_size,
     }
   }
 
-  cout << "Intersecting triangles with grid voxels" << endl;
+  // For debugging
+  if (debug_output) {
+    TriangleMeshType tri_mesh = TriangleMeshFactoryType::createFromTriangles(triangles.begin(), triangles.end());
+    ml::MeshDataf tri_mesh_ml = bh::MLibUtilities::convertBhToMlib(tri_mesh);
+    ml::MeshIOf::saveToPLY("tmp_split_mesh.ply", tri_mesh_ml);
+  }
+
+  // For debugging
+  std::vector<ml::TriMeshf> tmp_voxel_meshes;
+  std::vector<ml::TriMeshf> tmp_intersecting_voxel_meshes;
+
+  cout << "Intersecting " << triangles.size() << " triangles with grid voxels" << endl;
   // Iterate over all triangles
-#pragma omp parallel for
+//#pragma omp parallel for
   for (size_t i = 0; i < triangles.size(); ++i) {
     if (i % 100 == 0) {
-      cout << "Processing triangle " << i + 1 << " out of " << mesh.m_FaceIndicesVertices.size() << endl;
+      cout << "Processing triangle " << i + 1 << " out of " << triangles.size() << endl;
     }
-    const bh::Trianglef& tri = triangles[i];
+    const TriangleType& tri = triangles[i];
 
     // Loop over all voxels in triangle bounding box
     const bh::BoundingBox3Df bbox = tri.boundingBox();
     const Vector3 min_voxel = grid_utils.getMinIntersectingVoxel(bbox);
     const Vector3 max_voxel = grid_utils.getMaxIntersectingVoxel(bbox);
+    if (debug_output) {
+      std::cout << "i: " << i << std::endl;
+      std::cout << "v1: " << tri.v1().transpose() << std::endl;
+      std::cout << "v2: " << tri.v2().transpose() << std::endl;
+      std::cout << "v3: " << tri.v3().transpose() << std::endl;
+      std::cout << "bbox: " << bbox << std::endl;
+      std::cout << "min_voxel: " << min_voxel.transpose() << std::endl;
+      std::cout << "max_voxel: " << max_voxel.transpose() << std::endl;
+    }
     for (FloatType x = min_voxel(0); x <= max_voxel(0); x += grid_utils.getIncrement()) {
       for (FloatType y = min_voxel(1); y <= max_voxel(1); y += grid_utils.getIncrement()) {
         for (FloatType z = min_voxel(2); z <= max_voxel(2); z += grid_utils.getIncrement()) {
           const Vector3 voxel(x, y, z);
-          if (clip_bbox.isOutside(voxel)) {
+          const bh::BoundingBox3Df voxel_bbox(voxel, grid_utils.getIncrement());
+          // For debugging
+          if (debug_output) {
+            const ml::BoundingBox3f ml_bbox(bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMinimum()),
+                                            bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMaximum()));
+            const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox);
+            tmp_voxel_meshes.push_back(output_mesh);
+          }
+          if (tri.intersects(voxel_bbox)) {
+            // For debugging
+            if (debug_output) {
+              const ml::BoundingBox3f ml_bbox(bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMinimum()),
+                                              bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMaximum()));
+              const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox);
+              tmp_intersecting_voxel_meshes.push_back(output_mesh);
+            }
+          }
+          if (!clip_bbox.intersects(voxel_bbox)) {
             continue;
           }
           // This does not seem to do any speedup and prevents parallelization.
 //          if (intersecting_voxels.find(voxel) != intersecting_voxels.end()) {
 //            continue;
 //          }
-          const bh::BoundingBox3Df voxel_bbox(voxel, grid_utils.getIncrement());
           if (tri.intersects(voxel_bbox)) {
-#pragma omp critical
+//#pragma omp critical
             {
               intersecting_voxels.insert(voxel);
             }
@@ -127,6 +205,14 @@ void run(const string& mesh_filename, const FloatType voxel_size,
     }
   }
   cout << "Found " << intersecting_voxels.size() << " intersecting voxels" << endl;
+
+  // For debugging
+  if (debug_output) {
+    const ml::TriMeshf tmp_voxel_mesh = ml::Shapesf::unifyMeshes(tmp_voxel_meshes);
+    ml::MeshIOf::saveToPLY("tmp_voxel_mesh.ply", tmp_voxel_mesh.getMeshData());
+    const ml::TriMeshf tmp_intersecting_voxel_mesh = ml::Shapesf::unifyMeshes(tmp_intersecting_voxel_meshes);
+    ml::MeshIOf::saveToPLY("tmp_intersecting_voxel_mesh.ply", tmp_intersecting_voxel_mesh.getMeshData());
+  }
 
   Vector3 surface_min(std::numeric_limits<FloatType>::max(),
                       std::numeric_limits<FloatType>::max(),
@@ -178,8 +264,7 @@ void run(const string& mesh_filename, const FloatType voxel_size,
     std::vector<ml::TriMeshf> output_meshes;
     for (const Vector3 &voxel : intersecting_voxels) {
       const bh::BoundingBox3Df voxel_bbox(voxel, grid_utils.getIncrement());
-      const ml::BoundingBox3f ml_bbox(bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMinimum()),
-                                      bh::MLibUtilities::convertEigenToMlib(voxel_bbox.getMaximum()));
+      const ml::BoundingBox3f ml_bbox = bh::MLibUtilities::convertBhToMlib(voxel_bbox);
       const ml::TriMeshf output_mesh = ml::Shapesf::box(ml_bbox);
       output_meshes.push_back(output_mesh);
     }
@@ -203,7 +288,8 @@ int main(int argc, const char** argv) {
             ("mesh-output-filename", po::value<string>(), "Mesh output filename")
             ("bbox-min", po::value<Vector3>(), "Bounding box minimum")
             ("bbox-max", po::value<Vector3>(), "Bounding box maximum")
-            ("max-triangle-area", po::value<FloatType>()->default_value(5.0f), "Max triangle area");
+            ("max-triangle-area", po::value<FloatType>()->default_value(5.0f), "Max triangle area")
+            ("debug-output", po::bool_switch()->default_value(false), "Produce debug output");
 
     po::variables_map vm;
     try {
@@ -253,12 +339,14 @@ int main(int argc, const char** argv) {
     if (vm.count("bbox-max")) {
       bbox_max = vm["bbox-max"].as<Vector3>();
     }
+    std::cout << "Minimum bounding box: " << bbox_min.transpose() << std::endl;
+    std::cout << "Maximum bounding box: " << bbox_max.transpose() << std::endl;
     const BoundingBoxType bbox(bbox_min, bbox_max);
     const FloatType max_triangle_area = vm["max-triangle-area"].as<FloatType>();
     const FloatType max_squared_triangle_area = max_triangle_area * max_triangle_area;
     run(mesh_filename, voxel_size,
         text_output_filename, binary_output_filename, mesh_output_filename,
-        bbox, max_squared_triangle_area);
+        bbox, max_squared_triangle_area, vm["debug-output"].as<bool>());
 
     return 0;
   }

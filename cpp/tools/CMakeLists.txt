@@ -23,8 +23,9 @@ include_directories(${BOOST_INCLUDE_DIR})
 link_directories(${BOOST_LIBRARY_DIRS})
 add_definitions(-DBOOST_ALL_DYN_LINK=1)
 
+
 # Add mLib dependency
-set(MLIB_ROOT "$ENV{HOME}/src/mLib")
+set(MLIB_ROOT "$ENV{HOME}/src/mLib" CACHE PATH "Root path of mLib library")
 set(MLIB_INCLUDE_DIR "${MLIB_ROOT}/include")
 set(MLIB_SOURCE_DIR "${MLIB_ROOT}/src")
 include_directories(${MLIB_INCLUDE_DIR} ${MLIB_SOURCE_DIR})
@@ -56,3 +57,5 @@ if (OPENMP_FOUND)
 endif()
 
 add_subdirectory(surface_voxel_extractor)
+
+add_subdirectory(convert_bbox_to_mesh)
